@@ -106,6 +106,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
+    /// @notice Duration a guardian-initiated pause auto-expires without owner
+    ///         ratification, and the matching cooldown before the guardian may
+    ///         pause again after a TTL-dismissed pause. Together these bound the
+    ///         worst-case DoS duty cycle to ≤50 % if the guardian key leaks.
+    uint256 public constant GUARDIAN_PAUSE_TTL = 72 hours;
+
     /// @notice Maximum byte length of `Intent.destination`. A Stellar strkey
     ///         (G.../C...) is exactly 56 characters; longer values are invalid.
     ///         Enforced pre-dispatch so an oversized string cannot inflate the
@@ -142,6 +148,12 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         in-flight settlement still completes via `lzReceive` so funds are
     ///         never stranded mid-flight. Mirrors the Soroban side's pause.
     bool public paused;
+    /// @notice When a guardian-initiated pause auto-expires (0 if no guardian
+    ///         pause is active, or the current pause is owner-controlled).
+    uint256 public guardianPauseExpiry;
+    /// @notice Earliest timestamp at which the guardian may initiate a new pause,
+    ///         set by {decayGuardianPause} to rate-limit post-TTL re-pausing.
+    uint256 public guardianPauseCooldownUntil;
 
     // --- State ---------------------------------------------------------------
 
@@ -240,14 +252,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error SourceChainMismatch();
     error StringFieldEmpty();
     error StringFieldTooLong();
+    error GuardianCooldown();
+    error PauseNotGuardianInitiated();
+    error PauseNotExpired();
 
     // --- Modifiers -----------------------------------------------------------
 
     modifier nonReentrant() {
-        if (_reentrancy == 1) revert Reentrancy();
-        _reentrancy = 1;
+        if (_reentrancy != 1) revert Reentrancy();
+        _reentrancy = 2;
         _;
-        _reentrancy = 0;
+        _reentrancy = 1;
     }
 
     modifier onlyOwner() {
@@ -267,6 +282,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         endpoint = ILayerZeroEndpoint(_endpoint);
         stellarEid = _stellarEid;
         owner = msg.sender;
+        _reentrancy = 1; // 1/2/1 sentinel: slot stays non-zero, each lock/unlock is a warm SSTORE
         emit OwnershipTransferred(address(0), msg.sender);
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
@@ -305,19 +321,45 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice Emergency halt / resume. Blocks new locks and local refunds; does
     ///         not block inbound settlement so in-flight funds still resolve.
+    ///         Owner calling this clears any guardian-initiated expiry — if called
+    ///         with `true` the pause becomes indefinite; if `false` it also resets
+    ///         the guardian cooldown so the guardian remains operational.
     function setPaused(bool _paused) external onlyOwner {
         paused = _paused;
+        guardianPauseExpiry = 0; // owner takes full control; no auto-expiry
+        if (!_paused) guardianPauseCooldownUntil = 0; // reset cooldown on explicit unpause
         emit PausedSet(_paused);
     }
 
     /// @notice Instant emergency pause, callable by the owner or the guardian.
-    ///         Unpausing always goes through the owner via {setPaused}, so a
-    ///         compromised guardian can at worst halt the protocol, never resume
-    ///         or reconfigure it.
+    ///         A guardian-initiated pause auto-expires after GUARDIAN_PAUSE_TTL
+    ///         unless the owner ratifies it via {setPaused}; an owner-initiated
+    ///         pause has no expiry. After a TTL-dismissed guardian pause, the
+    ///         guardian is locked out for another GUARDIAN_PAUSE_TTL (cooldown),
+    ///         bounding the worst-case DoS duty cycle to ≤50 %.
     function pause() external {
         if (msg.sender != owner && msg.sender != guardian) revert NotAuthorized();
+        if (msg.sender == guardian) {
+            if (block.timestamp < guardianPauseCooldownUntil) revert GuardianCooldown();
+            guardianPauseExpiry = block.timestamp + GUARDIAN_PAUSE_TTL;
+        } else {
+            guardianPauseExpiry = 0; // owner pause: indefinite, no auto-expiry
+        }
         paused = true;
         emit PausedSet(true);
+    }
+
+    /// @notice Permissionless: dismisses a guardian-initiated pause once
+    ///         GUARDIAN_PAUSE_TTL has elapsed without owner ratification.
+    ///         Sets a matching cooldown so the guardian cannot immediately
+    ///         re-pause — forcing a TTL-length window for key rotation.
+    function decayGuardianPause() external {
+        if (guardianPauseExpiry == 0) revert PauseNotGuardianInitiated();
+        if (block.timestamp < guardianPauseExpiry) revert PauseNotExpired();
+        guardianPauseCooldownUntil = block.timestamp + GUARDIAN_PAUSE_TTL;
+        guardianPauseExpiry = 0;
+        paused = false;
+        emit PausedSet(false);
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
@@ -551,6 +593,31 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+    }
+
+    /// @notice EIP-5267 domain introspection. The `fields` bitmap 0x0f signals
+    ///         that name, version, chainId, and verifyingContract are all present.
+    ///         Wallets and off-chain tooling can call this to construct the domain
+    ///         separator without hard-coding values, and to detect contract/chain
+    ///         mismatches before signing.
+    function eip712Domain() external view returns (
+        bytes1 fields,
+        string memory name,
+        string memory version,
+        uint256 chainId,
+        address verifyingContract,
+        bytes32 salt,
+        uint256[] memory extensions
+    ) {
+        return (
+            bytes1(0x0f),    // bits 0-3: name + version + chainId + verifyingContract
+            "Perihelion",
+            "1",
+            block.chainid,
+            address(this),
+            bytes32(0),
+            new uint256[](0)
+        );
     }
 
     // --- Internal: codec -----------------------------------------------------
