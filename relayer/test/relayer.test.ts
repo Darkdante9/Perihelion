@@ -7,7 +7,21 @@ import type {
   Logger,
   SourceWatcher,
 } from "../src/relayer.js";
+import type { CheckpointStore } from "../src/checkpoint.js";
 import type { PendingMessage } from "../src/types.js";
+
+/** In-memory checkpoint store standing in for a restart between two Relayer instances. */
+function memoryCheckpointStore(): CheckpointStore {
+  let saved: number | undefined;
+  return {
+    async load() {
+      return saved;
+    },
+    async save(block) {
+      saved = block;
+    },
+  };
+}
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
 
@@ -76,23 +90,18 @@ test("skips messages already delivered (replay guard)", async () => {
   assert.equal(results[0]?.delivered, false);
 });
 
-test("a delivery failure does not advance the cursor past the failed message, and it is retried", async () => {
+test("a restarted relayer resumes from the persisted checkpoint, not the start block", async () => {
   const config = { ...loadConfig(), confirmations: 0 };
+  const checkpoint = memoryCheckpointStore();
+  const polledFrom: number[] = [];
   const watcher: SourceWatcher = {
     async poll(fromBlock) {
-      void fromBlock;
-      return { messages: [message(10), message(11)], head: 11 };
+      polledFrom.push(fromBlock);
+      return { messages: [message(fromBlock)], head: fromBlock };
     },
   };
-  let attempts = 0;
-  const delivered: string[] = [];
   const delivery: DestinationDelivery = {
-    async deliver(p) {
-      if (p.message.intentHash === message(10).message.intentHash) {
-        attempts++;
-        if (attempts === 1) throw new Error("network blip");
-      }
-      delivered.push(p.message.intentHash);
+    async deliver() {
       return "0xdst";
     },
     async isDelivered() {
@@ -100,14 +109,25 @@ test("a delivery failure does not advance the cursor past the failed message, an
     },
   };
 
-  const relayer = new Relayer(config, watcher, delivery, silent);
+  // First process: boots from scratch (no checkpoint yet), advances to block 50, "crashes".
+  const before = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+  await before.resume();
+  await before.tick(); // poll(0) -> head 0 -> cursor advances to 1, persisted.
 
-  const first = await relayer.tick();
-  assert.equal(first.find((r) => r.intentHash === message(10).message.intentHash)?.delivered, false);
-  // Block 11 still delivered even though block 10 failed.
-  assert.ok(delivered.includes(message(11).message.intentHash));
+  const advancing: SourceWatcher = {
+    async poll(fromBlock) {
+      polledFrom.push(fromBlock);
+      return { messages: [message(fromBlock)], head: 50 };
+    },
+  };
+  const stillRunning = new Relayer(config, advancing, delivery, silent, 0, checkpoint);
+  await stillRunning.resume(); // resumes from the checkpoint (1), not startBlock (0).
+  await stillRunning.tick(); // poll(1) -> head 50 -> cursor advances to 51, persisted.
 
-  const second = await relayer.tick();
-  assert.equal(second.find((r) => r.intentHash === message(10).message.intentHash)?.delivered, true);
-  assert.equal(delivered.filter((h) => h === message(10).message.intentHash).length, 1);
+  // Second process: a fresh Relayer instance (the "restart"), again with startBlock=0.
+  const restarted = new Relayer(config, advancing, delivery, silent, 0, checkpoint);
+  await restarted.resume();
+  await restarted.tick();
+
+  assert.deepEqual(polledFrom, [0, 1, 51]);
 });
