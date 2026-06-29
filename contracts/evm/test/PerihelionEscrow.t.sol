@@ -279,6 +279,9 @@ contract PerihelionEscrowTest is Test {
         uint64 fillLedger
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
+    event PeerSet(bytes32 peer);
+    event ConfirmationGraceSet(uint256 secondsGrace);
+    event GuardianSet(address indexed guardian);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -715,6 +718,8 @@ contract PerihelionEscrowTest is Test {
     // --- Admin ---------------------------------------------------------------
 
     function test_SetPeer() public {
+        vm.expectEmit(false, false, false, false);
+        emit PeerSet(bytes32(uint256(0x1234)));
         bytes32 newPeer = bytes32(uint256(0x1234));
         escrow.setPeer(newPeer);
         assertEq(escrow.stellarPeer(), newPeer);
@@ -727,6 +732,8 @@ contract PerihelionEscrowTest is Test {
     }
 
     function test_SetConfirmationGrace() public {
+        vm.expectEmit(false, false, false, false);
+        emit ConfirmationGraceSet(1 hours);
         escrow.setConfirmationGrace(1 hours);
         assertEq(escrow.confirmationGrace(), 1 hours);
     }
@@ -744,8 +751,17 @@ contract PerihelionEscrowTest is Test {
     }
 
     function test_SetConfirmationGraceAtCap() public {
+        vm.expectEmit(false, false, false, false);
+        emit ConfirmationGraceSet(escrow.MAX_CONFIRMATION_GRACE());
         escrow.setConfirmationGrace(escrow.MAX_CONFIRMATION_GRACE());
         assertEq(escrow.confirmationGrace(), escrow.MAX_CONFIRMATION_GRACE());
+    }
+
+    function test_SetGuardianEvent() public {
+        vm.expectEmit(true, false, false, false);
+        emit GuardianSet(address(0x6A));
+        escrow.setGuardian(address(0x6A));
+        assertEq(escrow.guardian(), address(0x6A));
     }
 
     // --- Pause ---------------------------------------------------------------
