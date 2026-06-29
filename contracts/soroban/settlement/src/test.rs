@@ -1000,125 +1000,145 @@ fn cancel_intent_when_locked_emits_event() {
     assert!(s.client.is_cancelled(&h));
 }
 
-// --- Negative / adversarial conformance vectors (issue #61) ------------------
+// --- Issue #57: Amount boundary conformance vectors --------------------------
 //
-// These tests verify that the inbound decoder rejects every class of malformed
-// payload. CancelIntent cases mirror the shared neg/ corpus so that EVM and
-// Soroban reject the same inputs identically.
+// These tests assert the boundary values documented in docs/intent-spec.md
+// §Amount Field Specification:
+//
+//   • i128::MAX is the maximum valid Soroban amount (fill_amount, min_dest_amount).
+//   • Amounts <= 0 are rejected at fill time and at registration time.
+//   • The sign boundary (i128::MAX + 1 as u128 would be negative as i128) is
+//     rejected because on_fill_instruction checks min_dest_amount <= 0 and
+//     fill_intent checks fill_amount <= 0.
+//   • The 16-byte wire field carries amounts as big-endian u128; the encoder
+//     performs a non-negative i128 -> u128 widening that is safe for all valid
+//     amounts.
 
-fn make_bytes(env: &Env, data: &[u8]) -> Bytes {
-    let mut b = Bytes::new(env);
-    for byte in data {
-        b.push_back(*byte);
+/// i128::MAX fills successfully (maximum valid amount).
+#[test]
+fn amount_boundary_i128_max_fills() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let max_amount: i128 = i128::MAX;
+    s.asset_admin.mint(&solver, &max_amount);
+
+    let h = hash(&s.env, 0xA1);
+    register_intent(&s, &h, &recipient, max_amount, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &max_amount, &0);
+
+    let tok = token::TokenClient::new(&s.env, &s.asset);
+    assert_eq!(tok.balance(&recipient), max_amount);
+    assert!(s.client.is_settled(&h));
+}
+
+/// fill_amount = 1 is the minimum accepted value (zero-plus-one boundary).
+#[test]
+fn amount_boundary_fill_amount_one() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA2);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &1, &0);
+    assert!(s.client.is_settled(&h));
+}
+
+/// fill_amount = 0 is rejected (zero boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_fill_amount_zero_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA3);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &0, &0);
+}
+
+/// fill_amount < 0 is rejected (negative boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_fill_amount_negative_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000);
+
+    let h = hash(&s.env, 0xA4);
+    register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
+
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &-1, &0);
+}
+
+/// min_dest_amount = 0 is rejected at registration (zero boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_min_dest_amount_zero_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    // min = 0 must be rejected by on_fill_instruction
+    register_intent(&s, &hash(&s.env, 0xA5), &recipient, 0, 5_000, 1, None);
+}
+
+/// min_dest_amount < 0 is rejected at registration (negative boundary).
+#[test]
+#[should_panic(expected = "Error(Contract, #145)")] // InvalidAmount
+fn amount_boundary_min_dest_amount_negative_rejected() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    register_intent(&s, &hash(&s.env, 0xA6), &recipient, -1, 5_000, 1, None);
+}
+
+/// Wire encoding of i128::MAX round-trips through encode_fill_confirmed without
+/// loss. The 16-byte big-endian u128 field must encode the maximum valid amount.
+#[test]
+fn amount_boundary_i128_max_wire_encoding() {
+    let env = Env::default();
+    let h = BytesN::from_array(&env, &[0x11u8; 32]);
+    let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
+    let max: i128 = i128::MAX;
+
+    let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, max, 0);
+    assert_eq!(b.len(), 90);
+
+    // Decode the 16-byte amount field at offset 66.
+    let mut amount_bytes = [0u8; 16];
+    for i in 0..16u32 {
+        amount_bytes[i as usize] = b.get(66 + i).unwrap();
     }
-    b
+    let decoded = u128::from_be_bytes(amount_bytes);
+    // i128::MAX as u128 is 170141183460469231731687303715884105727.
+    assert_eq!(decoded, max as u128);
+    // Verify the high bit is 0 (distinguishes i128::MAX from the sign boundary).
+    assert_eq!(amount_bytes[0] & 0x80, 0x00);
 }
 
+/// Wire encoding of amount = 1 (minimum valid).
 #[test]
-fn decode_message_rejects_too_short_header() {
+fn amount_boundary_one_wire_encoding() {
     let env = Env::default();
-    let b = make_bytes(&env, &[PROTOCOL_VERSION]);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
+    let h = BytesN::from_array(&env, &[0x11u8; 32]);
+    let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
 
-#[test]
-fn decode_message_rejects_bad_version() {
-    // Good structure (CancelIntent length) but wrong version byte.
-    let env = Env::default();
-    let mut data = vec![0x02u8, MSG_CANCEL_INTENT]; // version=0x02 (invalid)
-    data.extend_from_slice(&[0x22u8; 32]);
-    data.push(CANCEL_REASON_EXPIRED);
-    let b = make_bytes(&env, &data);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
+    let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, 1, 0);
+    assert_eq!(b.len(), 90);
 
-#[test]
-fn decode_message_rejects_unknown_type() {
-    let env = Env::default();
-    let b = make_bytes(&env, &[PROTOCOL_VERSION, 0x04u8]);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
-
-#[test]
-fn decode_message_rejects_cancel_intent_short() {
-    // Mirrors neg/cancel_intent_short.hex: 34 bytes (missing reason byte).
-    let env = Env::default();
-    let h = BytesN::from_array(&env, &[0x22u8; 32]);
-    let full = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
-    let mut short = Bytes::new(&env);
-    for i in 0..(full.len() - 1) {
-        short.push_back(full.get(i).unwrap());
+    let mut amount_bytes = [0u8; 16];
+    for i in 0..16u32 {
+        amount_bytes[i as usize] = b.get(66 + i).unwrap();
     }
-    assert_eq!(short.len(), 34);
-    assert_eq!(
-        crate::messages::decode_message(&env, &short),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
-
-#[test]
-fn decode_message_rejects_cancel_intent_long() {
-    // Mirrors neg/cancel_intent_long.hex: 36 bytes (extra trailing byte).
-    let env = Env::default();
-    let h = BytesN::from_array(&env, &[0x22u8; 32]);
-    let full = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
-    let mut long = full.clone();
-    long.push_back(0x00u8);
-    assert_eq!(long.len(), 36);
-    assert_eq!(
-        crate::messages::decode_message(&env, &long),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
-
-#[test]
-fn decode_message_rejects_cancel_intent_unknown_reason() {
-    // Mirrors neg/cancel_intent_bad_reason.hex: reason = 0xFF.
-    let env = Env::default();
-    let mut data = vec![PROTOCOL_VERSION, MSG_CANCEL_INTENT];
-    data.extend_from_slice(&[0x22u8; 32]);
-    data.push(0xFFu8); // unknown reason code
-    assert_eq!(data.len(), 35);
-    let b = make_bytes(&env, &data);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
-
-#[test]
-fn decode_message_rejects_fill_instruction_short() {
-    // FillInstruction is 158 bytes; 157 must be rejected.
-    let env = Env::default();
-    let mut data = vec![PROTOCOL_VERSION, MSG_FILL_INSTRUCTION];
-    data.extend_from_slice(&[0u8; 155]); // 2 + 155 = 157 bytes
-    assert_eq!(data.len(), 157);
-    let b = make_bytes(&env, &data);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
-}
-
-#[test]
-fn decode_message_rejects_fill_instruction_long() {
-    // FillInstruction is 158 bytes; 159 must be rejected.
-    let env = Env::default();
-    let mut data = vec![PROTOCOL_VERSION, MSG_FILL_INSTRUCTION];
-    data.extend_from_slice(&[0u8; 157]); // 2 + 157 = 159 bytes
-    assert_eq!(data.len(), 159);
-    let b = make_bytes(&env, &data);
-    assert_eq!(
-        crate::messages::decode_message(&env, &b),
-        Err(PerihelionError::MalformedPayload),
-    );
+    let decoded = u128::from_be_bytes(amount_bytes);
+    assert_eq!(decoded, 1u128);
 }

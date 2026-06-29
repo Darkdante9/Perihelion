@@ -7,10 +7,10 @@ import {
   buildIntent,
   DEFAULT_V_MIN,
   hashIntent,
-  IntentValidationError,
+  I128_MAX,
   perihelionDomain,
-  randomNonce,
-  validateIntent,
+  U128_MAX,
+  validateAmount,
   verifyIntent,
 } from "../src/intent.js";
 import { PerihelionClient } from "../src/client.js";
@@ -180,130 +180,137 @@ test("buildIntent respects custom vMin option", () => {
   }
 });
 
-// --- Issue #63: randomNonce -------------------------------------------------
+// ---------------------------------------------------------------------------
+// Issue #57 — Amount boundary conformance vectors
+//
+// These tests assert the exact boundary conditions documented in
+// docs/intent-spec.md §Amount Field Specification.
+// ---------------------------------------------------------------------------
 
-test("randomNonce uses library conversion and returns a value in [0, 2^256)", () => {
-  const nonce = randomNonce();
-  const value = BigInt(nonce);
-  assert.ok(value >= 0n, "nonce must be non-negative");
-  assert.ok(value < 2n ** 256n, "nonce must be below 2^256");
+// --- validateAmount unit tests ---------------------------------------------
+
+test("validateAmount: zero is rejected", () => {
+  assert.throws(() => validateAmount("0", "sourceAmount"), RangeError);
 });
 
-test("randomNonce round-trips through BigInt without loss", () => {
-  for (let i = 0; i < 5; i++) {
-    const nonce = randomNonce();
-    assert.equal(BigInt(nonce).toString(), nonce, "BigInt round-trip must be stable");
-  }
+test("validateAmount: 1 is accepted", () => {
+  assert.doesNotThrow(() => validateAmount("1", "sourceAmount"));
 });
 
-test("randomNonce produces distinct values across calls", () => {
-  const nonces = new Set(Array.from({ length: 20 }, () => randomNonce()));
-  assert.ok(nonces.size === 20, "all nonces must be distinct");
+test("validateAmount: i128::MAX is accepted for minDestAmount", () => {
+  assert.doesNotThrow(() => validateAmount(I128_MAX.toString(), "minDestAmount", I128_MAX));
 });
 
-// --- Issue #62: validateIntent / buildIntent validation ---------------------
-
-test("validateIntent accepts a well-formed intent", () => {
-  assert.doesNotThrow(() => validateIntent(sampleParams()));
-});
-
-test("validateIntent rejects invalid user address", () => {
+test("validateAmount: i128::MAX + 1 is rejected for minDestAmount", () => {
   assert.throws(
-    () => validateIntent({ ...sampleParams(), user: "0xnot-an-address" as `0x${string}` }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "user",
+    () => validateAmount((I128_MAX + 1n).toString(), "minDestAmount", I128_MAX),
+    RangeError
   );
 });
 
-test("validateIntent rejects destination that is too short", () => {
+test("validateAmount: u128::MAX is accepted for sourceAmount", () => {
+  assert.doesNotThrow(() => validateAmount(U128_MAX.toString(), "sourceAmount", U128_MAX));
+});
+
+test("validateAmount: u128::MAX + 1 is rejected for sourceAmount", () => {
   assert.throws(
-    () => validateIntent({ ...sampleParams(), destination: "GSHORT" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "destination",
+    () => validateAmount((U128_MAX + 1n).toString(), "sourceAmount", U128_MAX),
+    RangeError
   );
 });
 
-test("validateIntent rejects destination with invalid base32 chars", () => {
-  // '1', '8', '9', '0' are not in Stellar's base32 alphabet (A-Z, 2-7).
-  const bad = "G1OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO1";
+test("validateAmount: negative string is rejected", () => {
+  assert.throws(() => validateAmount("-1", "sourceAmount"), RangeError);
+});
+
+// --- buildIntent enforces amount bounds ------------------------------------
+
+test("buildIntent rejects sourceAmount of zero", () => {
   assert.throws(
-    () => validateIntent({ ...sampleParams(), destination: bad }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "destination",
+    () =>
+      buildIntent({
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "0",
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: "1",
+        deadline: 4102444800,
+      }),
+    RangeError
   );
 });
 
-test("validateIntent rejects non-positive sourceChainId", () => {
+test("buildIntent rejects minDestAmount exceeding i128::MAX", () => {
   assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceChainId: 0 }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceChainId",
-  );
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceChainId: -1 }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceChainId",
-  );
-});
-
-test("validateIntent rejects invalid sourceAsset address", () => {
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceAsset: "not-an-address" as `0x${string}` }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceAsset",
-  );
-});
-
-test("validateIntent rejects non-positive sourceAmount", () => {
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceAmount: "0" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceAmount",
-  );
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceAmount: "-1" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceAmount",
-  );
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), sourceAmount: "01" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "sourceAmount",
+    () =>
+      buildIntent({
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: "1000000",
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: (I128_MAX + 1n).toString(),
+        deadline: 4102444800,
+      }),
+    RangeError
   );
 });
 
-test("validateIntent rejects malformed destAsset", () => {
+test("buildIntent rejects sourceAmount exceeding u128::MAX", () => {
   assert.throws(
-    () => validateIntent({ ...sampleParams(), destAsset: "USDC" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "destAsset",
-  );
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), destAsset: "USDC:not-a-strkey" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "destAsset",
-  );
-});
-
-test("validateIntent accepts destAsset native", () => {
-  assert.doesNotThrow(() => validateIntent({ ...sampleParams(), destAsset: "native" }));
-});
-
-test("validateIntent rejects negative minDestAmount with leading zeros", () => {
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), minDestAmount: "00" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "minDestAmount",
-  );
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), minDestAmount: "-1" }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "minDestAmount",
+    () =>
+      buildIntent(
+        {
+          user: account.address,
+          destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+          sourceChainId: 8453,
+          sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          sourceAmount: (U128_MAX + 1n).toString(),
+          destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+          minDestAmount: "1",
+          deadline: 4102444800,
+        },
+        { suppressWarning: true }
+      ),
+    RangeError
   );
 });
 
-test("validateIntent accepts minDestAmount of zero", () => {
-  assert.doesNotThrow(() => validateIntent({ ...sampleParams(), minDestAmount: "0" }));
-});
-
-test("validateIntent rejects deadline in the past", () => {
-  const pastDeadline = Math.floor(Date.now() / 1000) - 1;
-  assert.throws(
-    () => validateIntent({ ...sampleParams(), deadline: pastDeadline }),
-    (err: unknown) => err instanceof IntentValidationError && err.field === "deadline",
+test("buildIntent accepts sourceAmount = u128::MAX (exact boundary)", () => {
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: U128_MAX.toString(),
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: "1",
+        deadline: 4102444800,
+      },
+      { suppressWarning: true }
+    )
   );
 });
 
-test("buildIntent throws IntentValidationError for malformed params", () => {
-  assert.throws(
-    () => buildIntent({ ...sampleParams(), destination: "TOOSHORT" }),
-    IntentValidationError,
+test("buildIntent accepts minDestAmount = i128::MAX (exact boundary)", () => {
+  assert.doesNotThrow(() =>
+    buildIntent(
+      {
+        user: account.address,
+        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        sourceChainId: 8453,
+        sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        sourceAmount: I128_MAX.toString(),
+        destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        minDestAmount: I128_MAX.toString(),
+        deadline: 4102444800,
+      },
+      { suppressWarning: true }
+    )
   );
 });

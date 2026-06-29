@@ -22,90 +22,85 @@ outcome and the constraints under which a solver may fill it.
 All amounts are decimal strings in the asset's smallest unit, preserving
 precision across the EVM (typically 6–18 decimals) and Stellar (7 decimals).
 
-## Asset representation
+## Amount Field Specification
 
-Perihelion uses two distinct representations for the destination asset depending
-on the layer of the stack:
+Each amount field has a distinct width, signedness, valid range, and set of
+conversion rules at the boundaries between layers. Mishandling any conversion is
+where cross-chain amount bugs live.
 
-### Off-chain canonical form (`StellarAsset`)
+### Field-by-field table
 
-The SDK (`sdk/src/types.ts`), relayer, and solver all use a human-readable
-string called `StellarAsset`:
+| Field | SDK type | EVM type | Wire type | Soroban type | Valid range | Max bridgeable |
+|---|---|---|---|---|---|---|
+| `sourceAmount` | `string` (decimal) | `uint256` | 16-byte big-endian u128 (informational) | n/a — not stored | [1, u128::MAX] | u128::MAX = 2¹²⁸ − 1 |
+| `minDestAmount` | `string` (decimal) | `uint256` | 16-byte big-endian u128 | `i128` | [1, i128::MAX] | i128::MAX = 2¹²⁷ − 1 |
+| `fill_amount` (Soroban) | n/a | n/a | 16-byte big-endian u128 | `i128` | [1, i128::MAX] | i128::MAX |
 
-| Value            | Meaning                                                        |
-| ---------------- | -------------------------------------------------------------- |
-| `"native"`       | XLM (the native Stellar asset)                                 |
-| `"CODE:ISSUER"`  | A Stellar classic asset, e.g. `"USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"` |
+> **Maximum bridgeable amount.** The 16-byte wire field constrains the maximum
+> amount that can round-trip end-to-end to **u128::MAX = 340,282,366,920,938,463,463,374,607,431,768,211,455**
+> for source amounts and **i128::MAX = 170,141,183,460,469,231,731,687,303,715,884,105,727**
+> for destination amounts. The stricter ceiling for destinations comes from
+> Soroban's `i128` type: amounts in the range (i128::MAX, u128::MAX] decode
+> correctly from the wire but would appear negative to the settlement contract,
+> which then rejects them (see Conversion rules below).
 
-This string appears in:
-- The user-signed `Intent.destAsset` field
-- The EIP-712 struct hash (as `keccak256(bytes(intent.destAsset))`)
-- The `FillInstruction` wire body encoded by the EVM escrow (`_encodeFillInstruction`)
-- All off-chain config, quotes, and API surfaces
+### Conversion rules at each boundary
 
-### On-chain form (Soroban `Address`)
+**1. SDK string → EVM `uint256`** (off-chain → on-chain, `lock`)
 
-Inside the Soroban settlement contract, `dest_asset` is stored and emitted as a
-Soroban `Address` — the 32-byte contract ID of the asset's
-[Stellar Asset Contract (SAC)](./glossary.md#sac-stellar-asset-contract). This
-is what the solver passes to `token::TokenClient::new(&env, &dest_asset)` to
-transfer funds to the recipient.
+- The SDK encodes amounts as decimal strings and passes them to viem's typed-data
+  encoder, which converts them to `bigint` / ABI `uint256`.
+- The SDK's `buildIntent` validates `sourceAmount ∈ [1, u128::MAX]` and
+  `minDestAmount ∈ [1, i128::MAX]` before constructing an intent; values outside
+  these ranges throw a `RangeError`.
+- A decimal string representing a value > 2²⁵⁶ − 1 would overflow `uint256` and
+  is also rejected by the SDK.
 
-### Mapping between the two
+**2. EVM `uint256` → 16-byte big-endian wire field** (`_encodeFillInstruction`)
 
-The conversion happens at the **LayerZero adapter boundary**: the adapter
-receives the `FillInstruction` message (which carries the `destAsset` string
-from the EVM side), derives the corresponding SAC contract address, and encodes
-the resulting 32 bytes into the 158-byte on-chain payload that the Soroban
-settlement contract decodes.
+- The EVM escrow transmits `received` (the measured-delta `uint256`) in a 16-byte
+  big-endian field. If `received > u128::MAX`, the implicit `uint128` truncation
+  silently loses the high bits — the field would be misread on the Soroban side.
+  The SDK ceiling on `sourceAmount ≤ u128::MAX` prevents this.
+- `minDestAmount` is transmitted identically as a 16-byte field. The same ceiling
+  applies: values > u128::MAX truncate.
 
-The derivation is deterministic and defined by the Stellar protocol:
+**3. 16-byte wire → Soroban `i128`** (`decode_fill_instruction`)
 
-```
-contract_id = SHA-256(
-    HashIDPreimage::CONTRACT_ID {
-        network_id:           SHA-256("<network passphrase>"),
-        contract_id_preimage: ContractIDPreimage::ASSET(<stellar XDR Asset>),
-    }
-)
-```
+- The decoder reads 16 bytes as `i128::from_be_bytes`. This is a **reinterpret**,
+  not a range-narrowing cast.
+- If the wire value is in [0, i128::MAX], `from_be_bytes` gives a non-negative
+  `i128`. The settlement contract then accepts it.
+- If the wire value is in (i128::MAX, u128::MAX] (high bit = 1), `from_be_bytes`
+  gives a **negative** `i128`. The settlement contract's `on_fill_instruction`
+  check (`min_dest_amount <= 0`) rejects the intent registration. The transaction
+  fails safely — no funds are moved — but the intent is unserviceable. The SDK's
+  `minDestAmount ≤ i128::MAX` ceiling prevents this from ever being reached.
 
-| `StellarAsset` string  | Stellar XDR `Asset`                                             | Notes                    |
-| ---------------------- | --------------------------------------------------------------- | ------------------------ |
-| `"native"`             | `Asset::NATIVE`                                                 | XLM                      |
-| `"CODE:ISSUER"`        | `Asset::CREDIT_ALPHANUM4` or `CREDIT_ALPHANUM12` (code + issuer key) | code ≤4 chars → ALPHANUM4 |
+**4. Soroban `i128` fill_amount → 16-byte wire** (`encode_fill_confirmed`)
 
-The `StellarBase.Contract.fromAsset(asset, networkPassphrase)` helper in the
-Stellar JS SDK computes the SAC address from an asset string.
+- Before encoding, the contract validates `fill_amount > 0`. A non-negative
+  `i128` is safe to widen to `u128` via `fill_amount as u128` (the Rust `as`
+  cast is defined: non-negative i128 → u128 is lossless, the high bit is 0).
+- The encoded bytes are then written big-endian. The EVM side reads this field
+  for observability only — it does not use the Stellar-declared amount to size
+  the release. `PerihelionEscrow._onFillConfirmed` releases `l.amount` (the
+  measured-delta locked amount), so no trust is placed in the Soroban-declared
+  fill amount.
 
-### `filled` event: indexer guidance
+**5. EVM `uint256` release**
 
-The Soroban settlement contract emits this event when a solver completes a fill
-([`lib.rs:335–338`](../contracts/soroban/settlement/src/lib.rs)):
+- The EVM escrow releases `l.amount`, not any amount from the wire payload. This
+  is intentional: the escrow already holds the authoritative value. See the
+  `_decodeFillConfirmed` doc-comment in `PerihelionEscrow.sol`.
 
-```
-topic:  ("filled", intent_hash: BytesN<32>)
-value:  (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)
-```
+### Sign boundary
 
-`dest_asset` in the event is the SAC `Address` (32-byte contract ID), **not**
-the `StellarAsset` string. An indexer consuming this event must resolve the
-contract address back to the canonical asset identifier. Two approaches:
-
-1. **Call the SAC `asset()` function** via Soroban RPC on the emitted contract
-   address. It returns the Stellar XDR `Asset`, from which you reconstruct
-   `"native"` or `"CODE:ISSUER"`.
-2. **Maintain a pre-image index**: for each asset your application cares about,
-   derive its SAC address at startup using `StellarBase.Contract.fromAsset` and
-   store the `(contract_id → StellarAsset)` mapping locally.
-
-**Decision rationale:** The event carries only the SAC `Address` and does not
-additionally emit the canonical string. The SAC address is the authoritative
-on-chain identifier — it is what the contract transfers against, and it uniquely
-identifies the asset without ambiguity. Adding a redundant string field would
-increase event size and introduce a surface for mismatch. The reverse mapping is
-deterministic and well-supported by Stellar tooling; it is the standard pattern
-for Stellar indexers and is not unique to Perihelion.
+The boundary between valid and invalid at the Soroban layer is at **i128::MAX**
+(= 0x7FFF…FFFF in 16 bytes). The next value, i128::MAX + 1 (= 0x8000…0000),
+has the high bit set; `i128::from_be_bytes` yields `i128::MIN` (−2¹²⁷), which
+is negative and rejected. The SDK enforces `minDestAmount ≤ i128::MAX` so this
+boundary is never reached in normal operation.
 
 ## EIP-712 encoding
 
