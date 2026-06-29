@@ -44,11 +44,11 @@ pub enum DataKey {
     // Persistent tier (transport bookkeeping).
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// Tracks which nonces have been processed. The bitmap covers nonces in
-    /// the range [base+1, base+64] where base is stored in InboundNonceBase.
+    /// the range [base, base + 63] where base is stored separately.
     ///
-    /// REPLAY-SAFETY: archival of this entry resets the bitmap to zero,
-    /// allowing re-acceptance of all nonces in the current window. TTL must
-    /// be extended to MAX_TTL on every write; see accept_nonce in lib.rs.
+    /// This is the per-eid **LayerZero transport nonce** state — distinct from
+    /// `Intent.nonce` (a 256-bit random collision-prevention field in the
+    /// EIP-712 payload). See `docs/TECHNICAL-ARCHITECTURE.md §11`.
     InboundNonceBitmap(u32),
     /// Base nonce for the bitmap window (implicit 0 before first message).
     ///
