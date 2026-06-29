@@ -32,6 +32,26 @@ import {
 ///      balance. The `skim` function recovers surplus that cannot be attributed
 ///      to any active lock (e.g., from a rebase-up). Rebase-down scenarios can
 ///      result in stuck funds — operators should gate listed assets accordingly.
+///
+///      ## Event Shape Specification (issue #102)
+///      Events are the off-chain integration surface for indexers, relayers, and
+///      monitoring tooling. Each event shape below is a VERSIONED INTERFACE.
+///      Changes to event topics or payloads MUST be reflected in the Soroban
+///      contract (see `contracts/soroban/settlement/src/lib.rs`).
+///
+///      | Event                  | Topics                                              | Data                          |
+///      |------------------------|-----------------------------------------------------|-------------------------------|
+///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
+///      | Released               | intentHash, solver, user                             | amount, fillAmount, fillLedger |
+///      | Refunded               | intentHash, user, reason                             | amount                        |
+///      | PeerSet                | -                                                   | peer                          |
+///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  |
+///      | GuardianSet            | guardian                                            | -                             |
+///      | PausedSet              | -                                                   | paused                        |
+///      | OwnershipTransferStart | previousOwner, newOwner                               | -                             |
+///      | OwnershipTransferred   | previousOwner, newOwner                               | -                             |
+///      | OwnershipTransferCancel| previousOwner                                         | -                             |
+///      | Skimmed                | token, to                                           | amount                        |
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
