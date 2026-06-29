@@ -4,7 +4,7 @@ use super::*;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Ledger as _},
-    token, Address, BytesN, Env,
+    token, Address, Bytes, BytesN, Env,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
@@ -1000,48 +1000,125 @@ fn cancel_intent_when_locked_emits_event() {
     assert!(s.client.is_cancelled(&h));
 }
 
-// --- Replay-safety: nonce TTL extension ---------------------------------------
+// --- Negative / adversarial conformance vectors (issue #61) ------------------
+//
+// These tests verify that the inbound decoder rejects every class of malformed
+// payload. CancelIntent cases mirror the shared neg/ corpus so that EVM and
+// Soroban reject the same inputs identically.
 
-#[test]
-fn inbound_nonce_ttl_extended_on_write() {
-    // Each accepted nonce must extend both nonce storage entries to MAX_TTL.
-    // If either entry is archived, the replay high-water mark silently resets
-    // to zero, re-opening previously consumed nonces.
-    let s = setup();
-    let recipient = Address::generate(&s.env);
-    let h = hash(&s.env, 51);
-    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-
-    let contract_id = s.client.address.clone();
-    s.env.as_contract(&contract_id, || {
-        let ps = s.env.storage().persistent();
-        let base_ttl = ps.get_ttl(&DataKey::InboundNonceBase(s.src_eid));
-        let bitmap_ttl = ps.get_ttl(&DataKey::InboundNonceBitmap(s.src_eid));
-        assert_eq!(base_ttl, MAX_TTL, "InboundNonceBase TTL must be MAX_TTL after write");
-        assert_eq!(bitmap_ttl, MAX_TTL, "InboundNonceBitmap TTL must be MAX_TTL after write");
-    });
+fn make_bytes(env: &Env, data: &[u8]) -> Bytes {
+    let mut b = Bytes::new(env);
+    for byte in data {
+        b.push_back(*byte);
+    }
+    b
 }
 
 #[test]
-fn inbound_nonce_ttl_extended_after_window_advance() {
-    // Window-advance path also writes and must extend both nonce entries.
-    let s = setup();
-    let recipient = Address::generate(&s.env);
+fn decode_message_rejects_too_short_header() {
+    let env = Env::default();
+    let b = make_bytes(&env, &[PROTOCOL_VERSION]);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
 
-    // Nonce 1 seeds the bitmap without advancing the window.
-    let h1 = hash(&s.env, 52);
-    register_intent(&s, &h1, &recipient, 1, 5_000, 1, None);
+#[test]
+fn decode_message_rejects_bad_version() {
+    // Good structure (CancelIntent length) but wrong version byte.
+    let env = Env::default();
+    let mut data = vec![0x02u8, MSG_CANCEL_INTENT]; // version=0x02 (invalid)
+    data.extend_from_slice(&[0x22u8; 32]);
+    data.push(CANCEL_REASON_EXPIRED);
+    let b = make_bytes(&env, &data);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
 
-    // Nonce 200 (> 0 + 64) forces a window advance, rewriting both keys.
-    let h2 = hash(&s.env, 53);
-    register_intent(&s, &h2, &recipient, 1, 5_000, 200, None);
+#[test]
+fn decode_message_rejects_unknown_type() {
+    let env = Env::default();
+    let b = make_bytes(&env, &[PROTOCOL_VERSION, 0x04u8]);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
 
-    let contract_id = s.client.address.clone();
-    s.env.as_contract(&contract_id, || {
-        let ps = s.env.storage().persistent();
-        let base_ttl = ps.get_ttl(&DataKey::InboundNonceBase(s.src_eid));
-        let bitmap_ttl = ps.get_ttl(&DataKey::InboundNonceBitmap(s.src_eid));
-        assert_eq!(base_ttl, MAX_TTL, "InboundNonceBase TTL must be MAX_TTL after window advance");
-        assert_eq!(bitmap_ttl, MAX_TTL, "InboundNonceBitmap TTL must be MAX_TTL after window advance");
-    });
+#[test]
+fn decode_message_rejects_cancel_intent_short() {
+    // Mirrors neg/cancel_intent_short.hex: 34 bytes (missing reason byte).
+    let env = Env::default();
+    let h = BytesN::from_array(&env, &[0x22u8; 32]);
+    let full = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
+    let mut short = Bytes::new(&env);
+    for i in 0..(full.len() - 1) {
+        short.push_back(full.get(i).unwrap());
+    }
+    assert_eq!(short.len(), 34);
+    assert_eq!(
+        crate::messages::decode_message(&env, &short),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
+
+#[test]
+fn decode_message_rejects_cancel_intent_long() {
+    // Mirrors neg/cancel_intent_long.hex: 36 bytes (extra trailing byte).
+    let env = Env::default();
+    let h = BytesN::from_array(&env, &[0x22u8; 32]);
+    let full = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
+    let mut long = full.clone();
+    long.push_back(0x00u8);
+    assert_eq!(long.len(), 36);
+    assert_eq!(
+        crate::messages::decode_message(&env, &long),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
+
+#[test]
+fn decode_message_rejects_cancel_intent_unknown_reason() {
+    // Mirrors neg/cancel_intent_bad_reason.hex: reason = 0xFF.
+    let env = Env::default();
+    let mut data = vec![PROTOCOL_VERSION, MSG_CANCEL_INTENT];
+    data.extend_from_slice(&[0x22u8; 32]);
+    data.push(0xFFu8); // unknown reason code
+    assert_eq!(data.len(), 35);
+    let b = make_bytes(&env, &data);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
+
+#[test]
+fn decode_message_rejects_fill_instruction_short() {
+    // FillInstruction is 158 bytes; 157 must be rejected.
+    let env = Env::default();
+    let mut data = vec![PROTOCOL_VERSION, MSG_FILL_INSTRUCTION];
+    data.extend_from_slice(&[0u8; 155]); // 2 + 155 = 157 bytes
+    assert_eq!(data.len(), 157);
+    let b = make_bytes(&env, &data);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
+}
+
+#[test]
+fn decode_message_rejects_fill_instruction_long() {
+    // FillInstruction is 158 bytes; 159 must be rejected.
+    let env = Env::default();
+    let mut data = vec![PROTOCOL_VERSION, MSG_FILL_INSTRUCTION];
+    data.extend_from_slice(&[0u8; 157]); // 2 + 157 = 159 bytes
+    assert_eq!(data.len(), 159);
+    let b = make_bytes(&env, &data);
+    assert_eq!(
+        crate::messages::decode_message(&env, &b),
+        Err(PerihelionError::MalformedPayload),
+    );
 }

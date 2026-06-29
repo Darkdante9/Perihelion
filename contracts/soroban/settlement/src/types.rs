@@ -56,10 +56,6 @@ pub enum DataKey {
     /// re-acceptance of any nonce below the previous high-water mark. TTL must
     /// be extended to MAX_TTL on every write; see accept_nonce in lib.rs.
     InboundNonceBase(u32),
-
-    // Persistent tier (solver reputation — PROPOSED Phase 3).
-    /// Aggregate reputation metrics for a solver address.
-    SolverReputation(Address),
 }
 
 /// Lifecycle state of a registered intent.

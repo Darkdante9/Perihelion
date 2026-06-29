@@ -106,20 +106,6 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
-    /// @notice Duration a guardian-initiated pause auto-expires without owner
-    ///         ratification, and the matching cooldown before the guardian may
-    ///         pause again after a TTL-dismissed pause. Together these bound the
-    ///         worst-case DoS duty cycle to ≤50 % if the guardian key leaks.
-    uint256 public constant GUARDIAN_PAUSE_TTL = 72 hours;
-
-    /// @notice Maximum byte length of `Intent.destination`. A Stellar strkey
-    ///         (G.../C...) is exactly 56 characters; longer values are invalid.
-    ///         Enforced pre-dispatch so an oversized string cannot inflate the
-    ///         LayerZero fee or cause a decode failure on the Soroban side.
-    uint256 public constant MAX_DESTINATION_LEN = 56;
-    /// @notice Maximum byte length of `Intent.destAsset`. The longest valid form
-    ///         is `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6.
-    uint256 public constant MAX_DEST_ASSET_LEN = 69;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -702,11 +688,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             ledgerWord := calldataload(add(m.offset, 82))
         }
         intentHash = hashWord;
-        solverEvm  = address(uint160(uint256(solverWord)));
-        // High 16 bytes of the 32-byte word loaded at offset 66.
-        fillAmount = uint128(uint256(amountWord >> 128));
-        // High 8 bytes of the 32-byte word loaded at offset 82.
-        fillLedger = uint64(uint256(ledgerWord >> 192));
+        // Reject non-zero high 12 bytes: a valid EVM address occupies the low 20 bytes
+        // (160 bits) of the 32-byte word. Any non-zero bit above that would silently
+        // truncate to a different address, potentially redirecting funds.
+        if (uint256(solverWord) >> 160 != 0) revert MalformedPayload();
+        solverEvm = address(uint160(uint256(solverWord)));
     }
 
     /// @dev Decode a 35-byte CancelIntent:
