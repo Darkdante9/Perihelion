@@ -37,10 +37,8 @@
 import type { RelayerConfig } from "./config.js";
 import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
-import type { PendingMessage, RelayResult, MessageKey } from "./types.js";
-import { messageKeyString } from "./types.js";
-import type { DeadLetterStore } from "./dead-letter.js";
-import { InMemoryDeadLetterStore } from "./dead-letter.js";
+import type { PendingMessage, RelayResult } from "./types.js";
+import { BackoffState } from "./backoff.js";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -119,18 +117,7 @@ interface BlockRecord {
 export class Relayer {
   private running = false;
   private cursor: number;
-  /** Rolling window of the last `confirmations + 1` processed block headers. */
-  private blockWindow: BlockRecord[] = [];
-
-  /** Per-message attempt counters; key = messageKeyString. */
-  private readonly attempts = new Map<string, number>();
-
-  readonly metrics: RelayMetrics = {
-    delivered: 0,
-    failed: 0,
-    deadLettered: 0,
-    maxRetryDepth: 0,
-  };
+  private readonly backoff: BackoffState;
 
   constructor(
     private readonly config: RelayerConfig,
@@ -143,6 +130,7 @@ export class Relayer {
     private readonly retry: RetryPolicy = DEFAULT_RETRY,
   ) {
     this.cursor = startBlock;
+    this.backoff = new BackoffState(config);
   }
 
   /**
@@ -166,10 +154,15 @@ export class Relayer {
     while (this.running) {
       try {
         await this.tick();
+        this.backoff.recordSuccess();
       } catch (err) {
-        this.log.error("tick failed", { err: String(err) });
+        this.backoff.recordFailure();
+        this.log.error("tick failed", {
+          err: String(err),
+          consecutiveFailures: this.backoff.consecutiveFailures,
+        });
       }
-      await sleep(this.config.pollIntervalMs);
+      await sleep(this.backoff.nextDelay());
     }
   }
 
@@ -179,44 +172,9 @@ export class Relayer {
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
-    const { messages, head, headHash, parentHash } =
-      await this.watcher.poll(this.cursor);
-
-    // ── Reorg detection ────────────────────────────────────────────────────
-    if (headHash !== undefined && parentHash !== undefined) {
-      const reorgDepth = this.detectReorg(head, headHash, parentHash);
-      if (reorgDepth > 0) {
-        this.log.warn("reorg detected, rolling back cursor", {
-          reorgDepth,
-          head,
-          headHash,
-        });
-        if (reorgDepth > this.config.confirmations) {
-          this.log.error("DEEP_REORG", {
-            reorgDepth,
-            confirmations: this.config.confirmations,
-            head,
-            headHash,
-            action:
-              "Manual inspection required — delivered messages in orphaned blocks may need remediation",
-          });
-        }
-        // Roll cursor back to before the reorg; idempotency guards re-delivery.
-        // Clear the block window entries for the rolled-back range so we don't
-        // keep re-detecting the same reorg next tick.
-        this.cursor = Math.max(this.startBlock, head - reorgDepth);
-        await this.checkpoint.save(this.cursor);
-        this.blockWindow = this.blockWindow.filter(
-          (b) => b.number < this.cursor,
-        );
-        // Return empty — the next scheduled tick will re-poll from the
-        // rolled-back cursor on a clean chain state.
-        return [];
-      }
-      // Record this head in the window.
-      this.recordBlock({ number: head, hash: headHash, parentHash });
-    }
-    // ── End reorg detection ────────────────────────────────────────────────
+    const { messages, head } = await this.watcher.poll(this.cursor);
+    const confirmedHead = head - this.config.confirmations;
+    const results: RelayResult[] = [];
 
     const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];

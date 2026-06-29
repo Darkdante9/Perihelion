@@ -22,7 +22,10 @@
 
 import { isExpired, fromSmallestUnits, toSmallestUnits } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
+import { zeroAddress, isAddressEqual, type Address } from "viem";
 import type { SolverConfig } from "./config.js";
+import type { InventoryProvider, InFlightTracker } from "./inventory.js";
+import { UnlimitedInventoryProvider } from "./inventory.js";
 
 // ─── injectable interfaces ───────────────────────────────────────────────────
 
@@ -128,10 +131,42 @@ export interface FillDecision {
  * profit_bps = (proceeds - deliveryCost - fees) * 10_000 / proceeds
  * where deliveryCost = minDestAmount (solver must deliver at least this).
  */
+// Decimal places for corridor assets.
+// EVM stablecoins (USDC, EURC, …) use 6dp; Stellar assets use 7dp.
+const SOURCE_DECIMALS = 6;
+const DEST_DECIMALS = 7;
+
+export async function priceDestAsset(intent: Intent): Promise<bigint> {
+  // Convert source smallest-units → human → dest smallest-units for 1:1 rate.
+  // This centralises the 6↔7 decimal corridor rather than baking in * 10n.
+  const humanAmount = fromSmallestUnits(intent.sourceAmount, SOURCE_DECIMALS);
+  return BigInt(toSmallestUnits(humanAmount, DEST_DECIMALS));
+
+  // In production, fetch live quotes from an oracle or DEX:
+  // const rate = await fetchStellarDexRate(intent.sourceAsset, intent.destAsset);
+}
+
+/**
+ * Returns true when the intent is open to any solver or is reserved for
+ * `solverAddress`. Uses viem helpers for checksum-insensitive comparison.
+ */
+export function isSolverEligible(
+  preferredSolver: string,
+  solverAddress: Address,
+): boolean {
+  const preferred = preferredSolver as Address;
+  return (
+    isAddressEqual(preferred, zeroAddress) ||
+    isAddressEqual(preferred, solverAddress)
+  );
+}
+
+/** Decide whether to fill an intent given current config and pricing. */
 export async function evaluate(
   intent: Intent,
   config: SolverConfig,
-  deps: PricingDeps = {},
+  inventory: InventoryProvider = new UnlimitedInventoryProvider(),
+  inFlight?: InFlightTracker,
 ): Promise<FillDecision> {
   // ── terminal checks ──────────────────────────────────────────────────────
   if (isExpired(intent)) {
@@ -140,24 +175,8 @@ export async function evaluate(
   if (!config.supportedDestAssets.includes(intent.destAsset)) {
     return { fill: false, reason: `unsupported dest asset ${intent.destAsset}`, terminal: true };
   }
-  if (
-    intent.preferredSolver !== "0x0000000000000000000000000000000000000000" &&
-    intent.preferredSolver.toLowerCase() !== config.solverAddress.toLowerCase()
-  ) {
-    return { fill: false, reason: "reserved for another solver", terminal: true };
-  }
-
-  // ── pricing (potentially transient — oracle/RPC errors) ──────────────────
-  let proceeds: bigint;
-  let fees: bigint;
-  try {
-    const feeEstimator = deps.feeEstimator ?? defaultFeeEstimator;
-    [proceeds, fees] = await Promise.all([
-      computeProceeds(intent, deps),
-      feeEstimator(intent),
-    ]);
-  } catch (err) {
-    return { fill: false, reason: `pricing error: ${String(err)}`, terminal: false };
+  if (!isSolverEligible(intent.preferredSolver, config.solverAddress)) {
+    return { fill: false, reason: "reserved for another solver" };
   }
 
   const minOut = BigInt(intent.minDestAmount);
@@ -172,10 +191,14 @@ export async function evaluate(
   if (profit <= 0n) {
     return { fill: false, reason: "fee-inclusive profit is non-positive", terminal: false };
   }
-  const profitBps = Number((profit * 10_000n) / proceeds);
-  if (profitBps < config.minMarginBps) {
-    return { fill: false, reason: `profit ${profitBps}bps below threshold`, terminal: false, profitBps };
+
+  // Inventory check: ensure we can fund the fill after accounting for in-flight fills.
+  const required = deliverable;
+  const available = await inventory.availableBalance(intent.destAsset);
+  const reserved = inFlight?.reservedFor(intent.destAsset) ?? 0n;
+  if (available - reserved < required) {
+    return { fill: false, reason: "insufficient inventory", marginBps };
   }
 
-  return { fill: true, reason: "profitable", terminal: false, profitBps };
+  return { fill: true, reason: "profitable", marginBps };
 }
