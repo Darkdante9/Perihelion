@@ -20,6 +20,18 @@ import {
 /// @dev The EIP-712 domain/type is byte-identical to `@perihelion/sdk` and the
 ///      Soroban side (Invariant I5). Inbound FillConfirmed/CancelIntent use the
 ///      fixed binary layout the Soroban contract emits (architecture spec §3.3).
+///
+///      ## Token compatibility
+///      The measured-delta accounting at lock time handles fee-on-transfer tokens
+///      correctly by recording the exact amount received. However, this contract
+///      is NOT compatible with rebasing tokens (e.g., stETH) or tokens whose
+///      balance changes after deposit (e.g., deflationary supply adjustments).
+///      For such tokens, the balance attributable to a lock can drift between
+///      lock and release, potentially causing a release/refund to fail
+///      (insufficient balance) or succeed by drawing on another lock's fungible
+///      balance. The `skim` function recovers surplus that cannot be attributed
+///      to any active lock (e.g., from a rebase-up). Rebase-down scenarios can
+///      result in stuck funds — operators should gate listed assets accordingly.
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
@@ -40,7 +52,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address solver;
         address user;
         address asset;
-        uint256 amount; // measured-delta amount actually held
+        /// @dev Measured-delta amount received at lock time (fee-on-transfer safe).
+        ///      REBASING TOKENS ARE INCOMPATIBLE: the balance attributable to this
+        ///      lock can drift post-lock due to supply adjustments. See contract
+        ///      level NatSpec for details.
+        uint256 amount;
         uint256 deadline;
         bool released;
         bool refunded;
@@ -122,8 +138,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
-    /// @notice Lazy-nonce high-water mark per source endpoint id.
+    /// @notice Highest consumed nonce per source endpoint id. Used as a quick
+    ///         filtration — nonces at or below this are not necessarily consumed
+    ///         (out-of-order delivery may leave gaps), so the bitmap is the
+    ///         authoritative source. Off-chain monitors and the admin view should
+    ///         treat this as the low-water mark, not the exact set of consumed
+    ///         nonces.
     mapping(uint32 => uint64) public inboundNonce;
+    /// @notice Bitmap-based nonce tracking for unordered delivery (LayerZero
+    ///         lazy-nonce model). Each bit represents whether a specific nonce
+    ///         has been consumed: word index = nonce / 256, bit index = nonce % 256.
+    mapping(uint32 => mapping(uint256 => uint256)) private _inboundNonceBitmap;
 
     // --- Reentrancy invariant (I-RE) -----------------------------------------
     //
@@ -171,6 +196,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferCancelled(address indexed previousOwner);
+    event Skimmed(address indexed token, address indexed to, uint256 amount);
 
     // --- Errors --------------------------------------------------------------
 
@@ -202,6 +229,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error FeeTooLow();
     error ZeroAddress();
     error SourceChainMismatch();
+    error InsufficientBalance();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -283,11 +311,21 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Begin a two-step ownership handover. `newOwner` must call
-    ///         {acceptOwnership} to take effect; pass `address(0)` to cancel a
-    ///         pending handover.
+    ///         {acceptOwnership} to take effect. To cancel a pending handover
+    ///         with a clear event, use {cancelOwnershipTransfer} instead of
+    ///         passing `address(0)`.
     function transferOwnership(address newOwner) external onlyOwner {
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    /// @notice Cancel a pending ownership handover. Emits a distinct cancellation
+    ///         event so off-chain monitors can clearly distinguish a cancellation
+    ///         from a transfer-to-zero. Reverts if no handover is pending.
+    function cancelOwnershipTransfer() external onlyOwner {
+        if (pendingOwner == address(0)) revert NotOwner();
+        pendingOwner = address(0);
+        emit OwnershipTransferCancelled(owner);
     }
 
     /// @notice Complete a pending ownership handover. Callable only by the
@@ -298,6 +336,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         owner = pendingOwner;
         pendingOwner = address(0);
         emit OwnershipTransferred(previous, owner);
+    }
+
+    /// @notice Recover surplus tokens accidentally held by the contract (e.g., from
+    ///         rebasing tokens that increased in value, or direct transfers). This
+    ///         contract is NOT compatible with rebasing/deflationary tokens; this
+    ///         function is provided only to recover surplus that cannot be attributed
+    ///         to any active lock. Owner-only.
+    function skim(address token, address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        _safeTransfer(token, to, amount);
+        emit Skimmed(token, to, amount);
     }
 
     // --- Lock ----------------------------------------------------------------
@@ -378,8 +427,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ) external payable nonReentrant {
         if (msg.sender != address(endpoint)) revert NotEndpoint();
         if (origin.sender != stellarPeer) revert UntrustedPeer();
-        if (origin.nonce <= inboundNonce[origin.srcEid]) revert StaleNonce();
-        inboundNonce[origin.srcEid] = origin.nonce;
+        // Bitmap-based nonce tracking supports unordered delivery (LayerZero
+        // lazy-nonce model). A nonce is accepted exactly once regardless of
+        // delivery order. The high-water mark is updated opportunistically.
+        if (origin.nonce == 0 || _isNonceConsumed(origin.srcEid, origin.nonce)) {
+            revert StaleNonce();
+        }
+        _consumeNonce(origin.srcEid, origin.nonce);
 
         if (message.length < 2) revert MalformedPayload();
         // Accept exactly PROTOCOL_VERSION (currently 0x01). During a version-bump
@@ -589,6 +643,27 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             reason != CANCEL_REASON_ADMIN &&
             reason != CANCEL_REASON_INVALID
         ) revert MalformedPayload();
+    }
+
+    // --- Internal: nonce bitmap ----------------------------------------------
+
+    /// @dev Check whether a nonce has already been consumed for the given source
+    ///      endpoint. Uses a bitmap to allow unordered delivery.
+    function _isNonceConsumed(uint32 srcEid, uint64 nonce) private view returns (bool) {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        return (_inboundNonceBitmap[srcEid][wordIndex] >> bitIndex) & 1 == 1;
+    }
+
+    /// @dev Mark a nonce as consumed. Updates both the bitmap and the high-water
+    ///      mark (opportunistically, only when nonce advances it).
+    function _consumeNonce(uint32 srcEid, uint64 nonce) private {
+        uint256 wordIndex = uint256(nonce / 256);
+        uint256 bitIndex = uint256(nonce % 256);
+        _inboundNonceBitmap[srcEid][wordIndex] |= (1 << bitIndex);
+        if (nonce > inboundNonce[srcEid]) {
+            inboundNonce[srcEid] = nonce;
+        }
     }
 
     // --- Internal: signature & token safety ----------------------------------
