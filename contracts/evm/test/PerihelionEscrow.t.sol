@@ -481,6 +481,67 @@ contract PerihelionEscrowTest is Test {
         escrow.lock{ value: 0.01 ether }(intent, sig);
     }
 
+    // --- String field validation --------------------------------------------
+
+    /// Build a string of `n` repeated 'A' bytes.
+    function _str(uint256 n) private pure returns (string memory) {
+        bytes memory b = new bytes(n);
+        for (uint256 i = 0; i < n; i++) b[i] = bytes1("A");
+        return string(b);
+    }
+
+    function test_RevertWhen_DestinationEmpty() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = "";
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.StringFieldEmpty.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DestinationTooLong() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = _str(escrow.MAX_DESTINATION_LEN() + 1); // 57 bytes
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.StringFieldTooLong.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DestAssetEmpty() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destAsset = "";
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.StringFieldEmpty.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_RevertWhen_DestAssetTooLong() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destAsset = _str(escrow.MAX_DEST_ASSET_LEN() + 1); // 70 bytes
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        vm.expectRevert(PerihelionEscrow.StringFieldTooLong.selector);
+        escrow.lock{ value: 0.01 ether }(intent, sig);
+    }
+
+    function test_LockAtMaxDestinationLength() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destination = _str(escrow.MAX_DESTINATION_LEN()); // exactly 56 bytes
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig); // must not revert
+    }
+
+    function test_LockAtMaxDestAssetLength() public {
+        PerihelionEscrow.Intent memory intent = _intent();
+        intent.destAsset = _str(escrow.MAX_DEST_ASSET_LEN()); // exactly 69 bytes
+        bytes memory sig = _sign(intent);
+        vm.prank(solver);
+        escrow.lock{ value: 0.01 ether }(intent, sig); // must not revert
+    }
+
     // --- Inbound: FillConfirmed ---------------------------------------------
 
     function test_FillConfirmedReleasesToSolver() public {

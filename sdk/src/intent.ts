@@ -50,6 +50,19 @@ export type IntentParams = Omit<Intent, "nonce" | "preferredSolver"> &
   Partial<Pick<Intent, "nonce" | "preferredSolver">>;
 
 /**
+ * Maximum byte length of `Intent.destination`. A Stellar strkey (G.../C...) is
+ * exactly 56 characters. Matches `PerihelionEscrow.MAX_DESTINATION_LEN`.
+ */
+export const MAX_DESTINATION_LEN = 56;
+
+/**
+ * Maximum byte length of `Intent.destAsset`. The longest valid form is
+ * `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6 bytes.
+ * Matches `PerihelionEscrow.MAX_DEST_ASSET_LEN`.
+ */
+export const MAX_DEST_ASSET_LEN = 69;
+
+/**
  * Minimum economical intent size in USD. Below this threshold, the fixed LayerZero
  * messaging fee makes the intent unprofitable to fill. Override via {@link BuildOptions.minNotional}.
  * Default: $10 USD equivalent.
@@ -72,6 +85,16 @@ export interface BuildOptions {
 export function buildIntent(params: IntentParams, options?: BuildOptions): Intent {
   const vMin = options?.vMin ?? DEFAULT_V_MIN;
   const suppressWarning = options?.suppressWarning ?? false;
+
+  // Validate string fields against the on-chain bounds before hashing / signing.
+  if (!params.destination) throw new Error("Intent.destination must not be empty");
+  if (new TextEncoder().encode(params.destination).length > MAX_DESTINATION_LEN) {
+    throw new Error(`Intent.destination exceeds MAX_DESTINATION_LEN (${MAX_DESTINATION_LEN})`);
+  }
+  if (!params.destAsset) throw new Error("Intent.destAsset must not be empty");
+  if (new TextEncoder().encode(params.destAsset).length > MAX_DEST_ASSET_LEN) {
+    throw new Error(`Intent.destAsset exceeds MAX_DEST_ASSET_LEN (${MAX_DEST_ASSET_LEN})`);
+  }
 
   const intent: Intent = {
     ...params,

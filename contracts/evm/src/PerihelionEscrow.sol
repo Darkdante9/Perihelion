@@ -106,6 +106,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
+    /// @notice Maximum byte length of `Intent.destination`. A Stellar strkey
+    ///         (G.../C...) is exactly 56 characters; longer values are invalid.
+    ///         Enforced pre-dispatch so an oversized string cannot inflate the
+    ///         LayerZero fee or cause a decode failure on the Soroban side.
+    uint256 public constant MAX_DESTINATION_LEN = 56;
+    /// @notice Maximum byte length of `Intent.destAsset`. The longest valid form
+    ///         is `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6.
+    uint256 public constant MAX_DEST_ASSET_LEN = 69;
+
     // --- Immutable / config --------------------------------------------------
 
     /// @notice EIP-712 domain separator — binds signatures to this contract and chain.
@@ -229,7 +238,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error FeeTooLow();
     error ZeroAddress();
     error SourceChainMismatch();
-    error InsufficientBalance();
+    error StringFieldEmpty();
+    error StringFieldTooLong();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -371,6 +381,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (intent.preferredSolver != address(0) && intent.preferredSolver != msg.sender) {
             revert ReservedForSolver();
         }
+        // Reject oversized strings before paying the cross-chain fee. A Stellar
+        // strkey is exactly 56 chars; an asset id is at most CODE:ISSUER = 69.
+        // Empty strings are also invalid — they would produce an undecodable payload.
+        uint256 dstLen = bytes(intent.destination).length;
+        if (dstLen == 0) revert StringFieldEmpty();
+        if (dstLen > MAX_DESTINATION_LEN) revert StringFieldTooLong();
+        uint256 assetLen = bytes(intent.destAsset).length;
+        if (assetLen == 0) revert StringFieldEmpty();
+        if (assetLen > MAX_DEST_ASSET_LEN) revert StringFieldTooLong();
 
         bytes32 intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
