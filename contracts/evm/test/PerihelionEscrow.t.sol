@@ -268,7 +268,7 @@ contract PerihelionEscrowTest is Test {
         address asset,
         uint256 amount
     );
-    event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount);
+    event Released(bytes32 indexed intentHash, address indexed solver, uint256 amount, uint128 fillAmount, uint64 fillLedger);
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PausedSet(bool paused);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
@@ -548,7 +548,7 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
 
         vm.expectEmit(true, true, false, true);
-        emit Released(h, solver, 100_000);
+        emit Released(h, solver, 100_000, 100_000, 12345);
         _confirm(h, solver, 1);
 
         assertEq(token.balanceOf(solver), 100_000);
@@ -633,7 +633,7 @@ contract PerihelionEscrowTest is Test {
     function test_RevertWhen_BadProtocolVersion() public {
         bytes32 h = _lock();
         bytes memory message = abi.encodePacked(bytes1(0x02), T_FILL_CONFIRMED, h);
-        vm.expectRevert(PerihelionEscrow.MalformedPayload.selector);
+        vm.expectRevert(PerihelionEscrow.UnknownVersion.selector);
         endpoint.deliver(escrow, STELLAR_EID, STELLAR_PEER, 1, message);
     }
 

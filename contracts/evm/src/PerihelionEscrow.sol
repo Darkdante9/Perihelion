@@ -112,6 +112,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         flight — which would refund the user after the solver has already
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
+    /// @notice Duration of a guardian-initiated pause before it auto-expires.
+    ///         After expiry, the guardian enters a cooldown of equal length,
+    ///         bounding the worst-case DoS duty cycle to ≤50 %.
+    uint256 public constant GUARDIAN_PAUSE_TTL = 72 hours;
+    /// @notice Maximum length of the Stellar destination address string.
+    ///         A Stellar strkey is exactly 56 characters.
+    uint256 public constant MAX_DESTINATION_LEN = 56;
+    /// @notice Maximum length of the destAsset string (format: CODE:ISSUER).
+    ///         At most 69 characters for well-known asset identifiers.
+    uint256 public constant MAX_DEST_ASSET_LEN = 69;
 
 
     // --- Immutable / config --------------------------------------------------
@@ -707,6 +717,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // truncate to a different address, potentially redirecting funds.
         if (uint256(solverWord) >> 160 != 0) revert MalformedPayload();
         solverEvm = address(uint160(uint256(solverWord)));
+        // Decode informational fields from their high-position slots.
+        fillAmount = uint128(uint256(amountWord) >> 128);
+        fillLedger = uint64(uint256(ledgerWord) >> 192);
     }
 
     /// @dev Decode a 35-byte CancelIntent:

@@ -77,7 +77,7 @@ contract DifferentialFuzzTest is Test {
 
         // Construct a malformed solver_evm word: high 12 bytes != 0.
         bytes32 malformedSolver = bytes32(
-            (uint256(highBits) << 160) | uint256(uint160(0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA))
+            (uint256(highBits) << 160) | uint256(uint160(0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa))
         );
 
         bytes memory payload = abi.encodePacked(

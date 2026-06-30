@@ -45,7 +45,7 @@ contract AmountBoundaryTest is Test {
     // u128::MAX = 2^128 - 1
     uint256 internal constant U128_MAX = type(uint128).max;
     // i128::MAX = 2^127 - 1 = u128::MAX >> 1
-    uint256 internal constant I128_MAX = uint256(type(int128).max);
+    uint256 internal constant I128_MAX = uint256(uint128(type(int128).max));
 
     AmountBoundaryHarness internal harness;
 
