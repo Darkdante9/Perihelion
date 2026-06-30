@@ -307,6 +307,8 @@ See the [`sdk/` README](./sdk/README.md) for the full API.
 | [Architecture Overview](./docs/architecture.md)                         | High-level settlement flow and trust model                                  |
 | [Intent Specification](./docs/intent-spec.md)                           | The signable intent format and EIP-712 encoding                             |
 | [Deployment & Operations](./docs/deployment.md)                         | Production deployment, the timelock-multisig owner + guardian, and admin/incident runbooks |
+| [Relayer Runbook](./docs/relayer-runbook.md)                            | Relayer operator guide: key management, configuration, monitoring, crash recovery, reorg handling, and incident playbooks |
+| [Solver Runbook](./docs/running-a-solver.md)                            | Solver operator guide: setup, configuration, monitoring, and troubleshooting |
 | [Differential Fuzzing](./docs/differential-fuzzing.md)                  | Wire format codec validation harness for detecting encoder/decoder divergence |
 | [Coverage Reporting](./docs/coverage.md)                                | How to produce and interpret lcov/Codecov coverage for all three languages  |
 | [Glossary](./docs/glossary.md)                                          | Definitions of every protocol term                                          |
