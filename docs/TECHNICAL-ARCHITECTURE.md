@@ -2013,16 +2013,34 @@ This overwrites `PendingAdmin` without completing the handover.
 
 Every admin/config setter emits a structured event. The table below documents
 each event alongside its EVM analogue so a unified off-chain consumer can
-normalize events from both chains:
+normalize events from both chains.
 
-| Soroban event | EVM analogue | Payload |
-|---------------|--------------|---------|
-| `initialized(admin, endpoint)` | *(constructor — no explicit event)* | `(admin: Address, endpoint: Address)` |
-| `endpoint_set(old, new)` | *(no EVM equivalent — endpoint is immutable)* | `(old: Option<Address>, new: Address)` |
-| `peer_set(eid, old, new)` | `PeerSet(peer: bytes32)` | `(eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)` |
-| `admin_transfer_started(old, new)` | `OwnershipTransferStarted(previousOwner, newOwner)` | `(old: Address, new: Address)` |
-| `admin_transfer_completed(old, new)` | `OwnershipTransferred(previousOwner, newOwner)` | `(old: Address, new: Address)` |
-| `paused_set(value)` | `PausedSet(paused: bool)` | `(paused: bool)` |
+#### Lifecycle Events (intent hashing and fill/cancel)
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `registered(intent_hash)` | `Locked(intentHash, ...)` | `("registered", intent_hash)` | `(src_eid: u32, deadline: u64)` |
+| `filled(intent_hash)` | `Released(intentHash, ...)` | `("filled", intent_hash)` | `(solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32)` |
+| `cancelled(intent_hash)` | `Refunded(intentHash, ...)` | `("cancelled", intent_hash)` | `(src_eid: u32, deadline: u64)` |
+| `cancelled_inbound(intent_hash)` | — (inbound only) | `("cancelled_inbound", intent_hash)` | `(src_eid: u32)` |
+
+#### Config/Admin Events
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `initialized(admin, endpoint)` | *(constructor — no explicit event)* | `("initialized",)` | `(admin: Address, endpoint: Address)` |
+| `endpoint_set(old, new)` | *(no EVM equivalent — endpoint is immutable)* | `("endpoint_set",)` | `(old: Option<Address>, new: Address)` |
+| `peer_set(eid, old, new)` | `PeerSet(peer: bytes32)` | `("peer_set",)` | `(eid: u32, old: Option<BytesN<32>>, new: BytesN<32>)` |
+| `admin_transfer_started(old, new)` | `OwnershipTransferStarted(previousOwner, newOwner)` | `("admin_transfer_started",)` | `(old: Address, new: Address)` |
+| `admin_transfer_completed(old, new)` | `OwnershipTransferred(previousOwner, newOwner)` | `("admin_transfer_completed",)` | `(old: Address, new: Address)` |
+| `paused_set(value)` | `PausedSet(paused: bool)` | `("paused_set",)` | `(paused: bool)` |
+
+#### Audit/Race Condition Events
+
+| Soroban event | EVM analogue | Topics | Data |
+|---------------|------------|--------|------|
+| `confirmation_sent(intent_hash)` | — (inbound only) | `("confirmation_sent", intent_hash)` | `(solver: Address)` |
+| `cancel_ignored(intent_hash)` | — (inbound only) | `("cancel_ignored", intent_hash)` | `(status: IntentStatus as u32)` |
 
 **Why events matter for bridge security.** Peer and endpoint rotations are the
 highest-sensitivity config changes: a malicious peer rotation redirects trust
@@ -2031,6 +2049,11 @@ events, an off-chain monitor must poll instance storage and diff it — this
 cannot reconstruct history once an entry is overwritten. Events make these
 changes observable in real time by any indexer, security watcher, or monitoring
 dashboard.
+
+**Note on `cancel_ignored`.** This event is emitted when a cancel instruction
+is received after an intent has already reached a terminal state (Filled or
+ConfirmationSent). The `status` field indicates what state the intent was in,
+enabling off-chain reconciliation to distinguish "never arrived" from "lost race".
 
 ---
 

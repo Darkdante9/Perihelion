@@ -1235,6 +1235,10 @@ fn cancel_intent_when_locked_emits_event() {
         IntentStatus::Cancelled
     );
     assert!(s.client.is_cancelled(&h));
+
+    // Verify the cancelled_inbound event was emitted with correct src_eid
+    let events = s.env.events().all();
+    assert_cancelled_inbound_event(&events, &h.to_array(), s.src_eid);
 }
 
 // --- Issue #57: Amount boundary conformance vectors --------------------------
