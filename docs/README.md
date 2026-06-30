@@ -6,7 +6,8 @@
 | [architecture.md](./architecture.md)                    | High-level settlement flow and trust model (orientation)       |
 | [intent-spec.md](./intent-spec.md)                      | The signable intent format and EIP-712 encoding                |
 | [assets.md](./assets.md)                                | Canonical asset decimals, corridor conversion, and max amounts |
-| [running-a-solver.md](./running-a-solver.md)            | Operator runbook: prerequisites, configuration, monitoring, troubleshooting |
+| [running-a-solver.md](./running-a-solver.md)            | Solver operator runbook: prerequisites, configuration, monitoring, troubleshooting |
+| [relayer-runbook.md](./relayer-runbook.md)              | Relayer operator runbook: key management, configuration, monitoring, crash recovery, reorg handling, incident playbooks |
 | [deployment.md](./deployment.md)                        | Production deployment: timelock multisig, admin runbooks, incident response |
 | [CONTRIBUTING.md](./CONTRIBUTING.md)                    | How to contribute, and where the work lives                    |
 
