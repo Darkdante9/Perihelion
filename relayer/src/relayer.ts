@@ -6,8 +6,10 @@
  *
  * The relayer is **permissionless and trust-minimized**: it only transports
  * messages whose authenticity the destination contract verifies independently
- * (via the LayerZero DVN stack and, where available, Stellar Protocol 24 ZK
- * proofs). A malicious relayer can censor or delay, but cannot forge a delivery.
+ * (via the LayerZero DVN stack — the current verification mechanism).
+ * Stellar Protocol 24 ZK proofs are not yet integrated; see the roadmap in
+ * TECHNICAL-ARCHITECTURE.md §8.3 for the planned ZK verification path.
+ * A malicious relayer can censor or delay, but cannot forge a delivery.
  *
  * ## Reorg-handling policy
  *

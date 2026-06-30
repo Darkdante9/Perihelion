@@ -54,8 +54,25 @@ npm test
 
 - Write clear, imperative commit subjects (`Add cancel_expired_intent`, not
   `added stuff`). [Conventional Commits](https://www.conventionalcommits.org)
-  prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`) are encouraged.
+  prefixes (`feat:`, `fix:`, `docs:`, `chore:`, `test:`, `ci:`, `refactor:`,
+  `style:`, `perf:`) are **required** and enforced by CI. Allowed scopes:
+
+  | Scope      | Applies to                                    |
+  |------------|-----------------------------------------------|
+  | `evm`      | `contracts/evm/` (Solidity)                   |
+  | `soroban`  | `contracts/soroban/` (Rust)                   |
+  | `sdk`      | `sdk/`                                         |
+  | `relayer`  | `relayer/`                                     |
+  | `solver`   | `solver/`                                      |
+  | `mempool`  | `mempool/`                                     |
+  | `docs`     | `docs/` and package READMEs                   |
+  | `ci`       | `.github/workflows/` and CI config            |
+
+  Examples: `feat(evm): add measured-delta accounting`, `ci: add concurrency
+  groups`, `docs(sdk): fix typos in JSDoc`.
+
 - Keep PRs focused — one logical change per PR is easier to review and merge.
+- PR titles must also follow conventional commits (also enforced by CI).
 - Ensure CI is green: `npm test`, `cargo test`, `forge test`, and lints.
 - **Invariants first.** Reviewers check every contract PR against the protocol's
   [design invariants](./docs/TECHNICAL-ARCHITECTURE.md#0-design-invariants-read-first);
