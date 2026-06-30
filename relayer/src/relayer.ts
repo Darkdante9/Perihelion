@@ -37,8 +37,10 @@
 import type { RelayerConfig } from "./config.js";
 import type { CheckpointStore } from "./checkpoint.js";
 import { NoopCheckpointStore } from "./checkpoint.js";
-import type { PendingMessage, RelayResult } from "./types.js";
+import type { PendingMessage, RelayResult, MessageKey } from "./types.js";
+import { messageKeyString } from "./types.js";
 import { BackoffState } from "./backoff.js";
+import { InMemoryDeadLetterStore, type DeadLetterStore } from "./dead-letter.js";
 
 /** Observes bridge messages emitted on the source chain. */
 export interface SourceWatcher {
@@ -114,10 +116,28 @@ interface BlockRecord {
   parentHash: string;
 }
 
+/**
+ * Throw inside tick() (or any code it calls) to signal a non-recoverable
+ * condition. start() re-throws FatalError immediately instead of catching and
+ * continuing, so the process can exit non-zero and be restarted by its
+ * orchestrator.
+ */
+export class FatalError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "FatalError";
+  }
+}
+
 export class Relayer {
   private running = false;
   private cursor: number;
   private readonly backoff: BackoffState;
+  private readonly blockWindow: BlockRecord[] = [];
+  private readonly attempts = new Map<string, number>();
+  readonly metrics: RelayMetrics = { delivered: 0, failed: 0, deadLettered: 0, maxRetryDepth: 0 };
+  /** Resolves an in-progress interruptibleSleep early when stop() is called. */
+  private abortSleep: (() => void) | null = null;
 
   constructor(
     private readonly config: RelayerConfig,
@@ -142,7 +162,11 @@ export class Relayer {
     this.cursor = (await this.checkpoint.load()) ?? this.startBlock;
   }
 
-  /** Start the watch-and-relay loop. Resolves when {@link stop} is called. */
+  /**
+   * Start the watch-and-relay loop. Resolves when {@link stop} is called
+   * (graceful drain — the in-flight tick completes before start() returns).
+   * Rejects if a {@link FatalError} propagates out of tick().
+   */
   async start(): Promise<void> {
     await this.resume();
     this.running = true;
@@ -156,26 +180,37 @@ export class Relayer {
         await this.tick();
         this.backoff.recordSuccess();
       } catch (err) {
+        if (err instanceof FatalError) {
+          this.log.error("fatal error, relayer stopping", { err: String(err) });
+          throw err;
+        }
         this.backoff.recordFailure();
         this.log.error("tick failed", {
           err: String(err),
           consecutiveFailures: this.backoff.consecutiveFailures,
         });
       }
-      await sleep(this.backoff.nextDelay());
+      // Only sleep if stop() was not called during the tick.
+      if (this.running) {
+        await this.interruptibleSleep(this.backoff.nextDelay());
+      }
     }
   }
 
+  /**
+   * Signal the loop to stop after the current tick completes.
+   * Any in-progress inter-tick sleep is interrupted immediately so start()
+   * resolves without waiting for the full poll interval.
+   */
   stop(): void {
     this.running = false;
+    this.abortSleep?.();
+    this.abortSleep = null;
   }
 
   /** One watch-confirm-deliver cycle. Exposed for testing. */
   async tick(): Promise<RelayResult[]> {
     const { messages, head } = await this.watcher.poll(this.cursor);
-    const confirmedHead = head - this.config.confirmations;
-    const results: RelayResult[] = [];
-
     const confirmedHead = head - this.config.confirmations;
     const results: RelayResult[] = [];
 
@@ -223,6 +258,8 @@ export class Relayer {
       this.metrics.delivered += 1;
       return { intentHash, delivered: true, dstTxHash };
     } catch (err) {
+      if (err instanceof FatalError) throw err;
+
       const attempt = (this.attempts.get(keyStr) ?? 0) + 1;
       this.attempts.set(keyStr, attempt);
       this.metrics.maxRetryDepth = Math.max(this.metrics.maxRetryDepth, attempt);
@@ -312,6 +349,16 @@ export class Relayer {
     if (this.blockWindow.length > limit) {
       this.blockWindow.shift();
     }
+  }
+
+  private interruptibleSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      this.abortSleep = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
   }
 }
 
