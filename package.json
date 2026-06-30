@@ -18,12 +18,15 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "clean": "npm run clean --workspaces --if-present"
+    "clean": "npm run clean --workspaces --if-present",
+    "fmt": "npm run fmt --workspaces --if-present",
+    "fmt:check": "npm run fmt:check --workspaces --if-present"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "lefthook": "^1.7.0",
     "typescript": "^5.4.0"
   }
 }

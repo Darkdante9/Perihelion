@@ -39,6 +39,35 @@ npm test
 ( cd contracts/evm && forge install foundry-rs/forge-std && forge test )
 ```
 
+## Pre-commit hooks (optional but recommended)
+
+Perihelion uses [Lefthook](https://github.com/evilmartians/lefthook) to run the same
+format and lint checks that CI enforces — but locally, before you push.
+
+```bash
+# Install hooks (one-time)
+npx lefthook install
+```
+
+After installation, every `git commit` automatically:
+
+| Check | What it does |
+|---|---|
+| `cargo fmt` | Formats staged Rust files (`contracts/soroban/`) |
+| `cargo clippy` | Lints staged Rust files (`-D warnings`) |
+| `forge fmt` | Formats staged Solidity files (`contracts/evm/`) |
+| `tsc --noEmit` | Type-checks staged TypeScript files |
+| Build artifact guard | Rejects commits containing `node_modules/`, `dist/`, `target/`, `out/` |
+| Debug logging guard | Rejects commits containing `dbg!()` or `console.log()` |
+
+Pass `--no-verify` or set the `SKIP` env var to bypass selectively:
+
+```bash
+git commit --no-verify -m "wip"
+SKIP=cargo-clippy git commit -m "wip"
+SKIP=cargo-clippy,forge-fmt git commit -m "wip"
+```
+
 ## Workflow
 
 1. **Find or open an issue.** Comment to claim it so we avoid duplicate work.
