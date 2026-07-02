@@ -13,6 +13,110 @@ use soroban_sdk::{
     token, Address, Bytes, BytesN, Env,
 };
 
+// --- Authorization failure tests: no state mutation ----------------------------
+//
+// These tests verify that authorization failures (wrong endpoint, wrong peer,
+// stale nonce, malformed payload) reject without mutating any state. This is
+// critical for the trust boundary of the inbound path.
+
+/// Helper: Count events to verify no events were emitted.
+fn event_count(env: &Env) -> usize {
+    env.events().all().len()
+}
+
+/// Helper: Get nonce state for a given eid - returns (base, bitmap).
+fn get_nonce_state(env: &Env, eid: u32) -> (u64, u64) {
+    let ps = env.storage().persistent();
+    let base: u64 = ps.get(&DataKey::InboundNonceBase(eid)).unwrap_or(0);
+    let bitmap: u64 = ps.get(&DataKey::InboundNonceBitmap(eid)).unwrap_or(0);
+    (base, bitmap)
+}
+
+/// Assert: Untrusted peer rejection must not advance the nonce or emit events.
+#[test]
+fn untrusted_peer_rejected_no_state_change() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 1);
+    let initial_events = event_count(&s.env);
+
+    // Get initial nonce state
+    let (initial_base, initial_bitmap) = get_nonce_state(&s.env, s.src_eid);
+
+    // Send message with wrong peer
+    let fi = FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: s.src_eid,
+        recipient,
+        dest_asset: s.asset.clone(),
+        min_dest_amount: 1,
+        deadline: 5_000,
+        preferred_solver: None,
+        reservation_window: 0,
+    };
+    let wrong_peer = BytesN::from_array(&s.env, &[0xBB; 32]); // Not the configured peer
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: wrong_peer,
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    
+    let result = s.client.try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+    assert!(result.is_err(), "untrusted peer should be rejected");
+
+    // Verify nonce state unchanged
+    let (final_base, final_bitmap) = get_nonce_state(&s.env, s.src_eid);
+    assert_eq!(initial_base, final_base, "nonce base must not change on untrusted peer rejection");
+    assert_eq!(initial_bitmap, final_bitmap, "nonce bitmap must not change on untrusted peer rejection");
+
+    // Verify no events were emitted
+    let final_events = event_count(&s.env);
+    assert_eq!(final_events, initial_events, "no events should be emitted on untrusted peer rejection");
+
+    // Verify no intent was registered
+    assert!(s.client.get_intent(&h).is_none(), "intent must not be registered on untrusted peer rejection");
+}
+
+/// Assert: Stale nonce rejection must not advance the nonce (already consumed).
+#[test]
+fn stale_nonce_rejected_no_state_change() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 2);
+    let initial_events = event_count(&s.env);
+
+    // Register an intent to establish the contract state
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    // Get nonce state before replay
+    let (initial_base, initial_bitmap) = get_nonce_state(&s.env, s.src_eid);
+
+    // Replay with same nonce - should be rejected
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 1, // Same nonce as before
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+
+    let result = s.client.try_lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+    assert!(result.is_err(), "stale nonce should be rejected");
+
+    // Verify nonce state unchanged (the nonce was already consumed)
+    let (final_base, final_bitmap) = get_nonce_state(&s.env, s.src_eid);
+    assert_eq!(initial_base, final_base, "nonce base must not change on stale nonce rejection");
+    assert_eq!(initial_bitmap, final_bitmap, "nonce bitmap must not change on stale nonce rejection");
+
+    // Verify no events were emitted
+    let final_events = event_count(&s.env);
+    assert_eq!(final_events, initial_events, "no events should be emitted on stale nonce rejection");
+}
+
 // --- Mock LayerZero endpoint --------------------------------------------------
 //
 // Implements the `send` surface Perihelion depends on, recording each dispatch
