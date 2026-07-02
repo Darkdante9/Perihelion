@@ -213,6 +213,14 @@ clean-corpus: ## Remove generated fuzz corpus files
 	@rm -rf contracts/soroban/settlement/proptest-regressions/
 	@echo "Corpus cleaned."
 
+test-e2e: ## Run end-to-end integration tests
+	@echo "▶ test-e2e"
+	cd test && npm test
+
+test-e2e-watch: ## Run end-to-end tests in watch mode
+	@echo "▶ test-e2e-watch"
+	cd test && npm run test:watch
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 .DEFAULT_GOAL := help
