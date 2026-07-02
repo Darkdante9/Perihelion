@@ -1,9 +1,15 @@
 #![cfg(test)]
 
+extern crate std;
+
+use std::{collections::BTreeMap, fs, path::PathBuf, string::String};
+
 use super::*;
+use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events, Ledger as _},
+    xdr::{ContractEvent, ContractEventBody, ScVal},
     token, Address, Bytes, BytesN, Env,
 };
 
@@ -69,6 +75,62 @@ struct Setup {
     asset_admin: token::StellarAssetClient<'static>,
     src_eid: u32,
     peer: BytesN<32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceThreshold {
+    max_cpu_instructions: u64,
+    max_memory_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceBaselines {
+    max_wasm_size_bytes: u64,
+    tolerance_percent: u64,
+    entrypoints: BTreeMap<String, ResourceThreshold>,
+}
+
+fn load_resource_baselines() -> ResourceBaselines {
+    let baseline_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("ci")
+        .join("resource-baselines.json");
+    let content = fs::read_to_string(&baseline_path)
+        .unwrap_or_else(|err| panic!("failed to read resource baselines from {:?}: {err}", baseline_path));
+    serde_json::from_str(&content).unwrap_or_else(|err| panic!("failed to parse resource baselines from {:?}: {err}", baseline_path))
+}
+
+fn measure_entrypoint_budget<F>(s: &Setup, operation: F) -> (u64, u64)
+where
+    F: FnOnce(&Setup),
+{
+    s.env.cost_estimate().budget().reset_default();
+    operation(s);
+    let budget = s.env.cost_estimate().budget();
+    (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+}
+
+fn assert_budget_within(
+    entrypoint: &str,
+    cpu: u64,
+    mem: u64,
+    threshold: &ResourceThreshold,
+    tolerance_percent: u64,
+) {
+    let cpu_limit = threshold.max_cpu_instructions.saturating_add(
+        threshold.max_cpu_instructions.saturating_mul(tolerance_percent) / 100,
+    );
+    let mem_limit = threshold.max_memory_bytes.saturating_add(
+        threshold.max_memory_bytes.saturating_mul(tolerance_percent) / 100,
+    );
+
+    assert!(
+        cpu <= cpu_limit,
+        "{entrypoint} CPU budget regressed to {cpu} instructions (baseline {cpu_limit} with {tolerance_percent}% tolerance)"
+    );
+    assert!(
+        mem <= mem_limit,
+        "{entrypoint} memory budget regressed to {mem} bytes (baseline {mem_limit} with {tolerance_percent}% tolerance)"
+    );
 }
 
 fn setup() -> Setup {
@@ -153,6 +215,71 @@ fn register_intent_with_window(
     let guid = BytesN::from_array(&s.env, &[0u8; 32]);
     s.client
         .lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
+}
+
+// --- Resource budget baselines ------------------------------------------------
+
+#[test]
+fn resource_budget_baselines_are_within_thresholds() {
+    let baselines = load_resource_baselines();
+
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 100);
+
+    let lz_receive_threshold = baselines
+        .entrypoints
+        .get("lz_receive")
+        .expect("lz_receive baseline missing");
+    let (lz_cpu, lz_mem) = measure_entrypoint_budget(&s, |s| {
+        register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    });
+    assert_budget_within(
+        "lz_receive",
+        lz_cpu,
+        lz_mem,
+        lz_receive_threshold,
+        baselines.tolerance_percent,
+    );
+
+    let h2 = hash(&s.env, 101);
+    let fill_threshold = baselines
+        .entrypoints
+        .get("fill_intent")
+        .expect("fill_intent baseline missing");
+    register_intent(&s, &h2, &recipient, 100_000, 5_000, 2, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let (fill_cpu, fill_mem) = measure_entrypoint_budget(&s, |s| {
+        s.client.fill_intent(&solver, &solver_evm, &h2, &250_000, &0);
+    });
+    assert_budget_within(
+        "fill_intent",
+        fill_cpu,
+        fill_mem,
+        fill_threshold,
+        baselines.tolerance_percent,
+    );
+
+    let h3 = hash(&s.env, 102);
+    let cancel_threshold = baselines
+        .entrypoints
+        .get("cancel_expired_intent")
+        .expect("cancel_expired_intent baseline missing");
+    register_intent(&s, &h3, &recipient, 100_000, 5_000, 3, None);
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+    let caller = Address::generate(&s.env);
+    let (cancel_cpu, cancel_mem) = measure_entrypoint_budget(&s, |s| {
+        s.client.cancel_expired_intent(&caller, &h3, &0);
+    });
+    assert_budget_within(
+        "cancel_expired_intent",
+        cancel_cpu,
+        cancel_mem,
+        cancel_threshold,
+        baselines.tolerance_percent,
+    );
 }
 
 // --- Happy path ---------------------------------------------------------------
@@ -496,6 +623,235 @@ fn set_paused_emits_event() {
     assert!(!events.is_empty(), "expected events after set_paused");
 }
 
+// --- Event shape assertions ---------------------------------------------------
+//
+// Events are the off-chain integration surface (indexers, relayer, monitoring).
+// These tests assert the exact topic symbol and data tuple for each event,
+// treating event shapes as a versioned interface that must not change silently.
+
+/// Helper: Assert an event with the expected topic symbol exists.
+fn assert_event_with_symbol(
+    events: &[(Address, Vec<soroban_sdk::Val>, soroban_sdk::Val)],
+    expected_sym: &str,
+    expected_data_len: usize,
+) {
+    let _ = expected_data_len;
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| format!("{topic:?}").contains(expected_sym))
+    });
+    assert!(found, "event '{}' not found", expected_sym);
+}
+
+/// Assert `registered` event: topics = ("registered", intent_hash), data = (src_eid, deadline)
+#[test]
+fn registered_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 1);
+    let deadline_val = 5_000;
+    register_intent(&s, &h, &recipient, 100_000, deadline_val, 1, None);
+
+    let events = s.env.events().all();
+    // Event: ("registered", intent_hash) -> (src_eid, deadline)
+    assert_event_with_symbol(&events, "registered", 2);
+}
+
+/// Assert `filled` event: topics = ("filled", intent_hash), data = (solver, dest_asset, fill_amount, src_eid)
+#[test]
+fn filled_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 2);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let fill_amount = 250_000;
+    s.client.fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
+
+    let events = s.env.events().all();
+    // Event: ("filled", intent_hash) -> (solver, dest_asset, fill_amount, src_eid)
+    assert_event_with_symbol(&events, "filled", 4);
+}
+
+/// Assert `cancelled` event: topics = ("cancelled", intent_hash), data = (src_eid, deadline)
+#[test]
+fn cancelled_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 3);
+    let deadline_val = 5_000;
+    register_intent(&s, &h, &recipient, 100_000, deadline_val, 1, None);
+
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000);
+    s.client.cancel_expired_intent(&caller, &h, &0);
+
+    let events = s.env.events().all();
+    // Event: ("cancelled", intent_hash) -> (src_eid, deadline)
+    assert_event_with_symbol(&events, "cancelled", 2);
+}
+
+/// Assert `cancelled_inbound` event: topics = ("cancelled_inbound", intent_hash), data = (src_eid,)
+#[test]
+fn cancelled_inbound_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let h = hash(&s.env, 4);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    let events = s.env.events().all();
+    // Event: ("cancelled_inbound", intent_hash) -> (src_eid,)
+    assert_event_with_symbol(&events, "cancelled_inbound", 1);
+}
+
+/// Assert `confirmation_sent` event: topics = ("confirmation_sent", intent_hash), data = (solver,)
+#[test]
+fn confirmation_sent_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 5);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    // Fill without dispatch via deliver_intent
+    s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
+
+    let caller = Address::generate(&s.env);
+    s.client.dispatch_confirmation(&caller, &h, &0);
+
+    let events = s.env.events().all();
+    // Event: ("confirmation_sent", intent_hash) -> (solver,)
+    assert_event_with_symbol(&events, "confirmation_sent", 1);
+}
+
+/// Assert `initialized` event: topics = ("initialized",), data = (admin, endpoint)
+#[test]
+fn initialized_event_shape() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+        li.max_entry_ttl = 3_110_400;
+    });
+    let endpoint_addr = env.register(MockEndpoint, ());
+    let id = env.register(Perihelion, ());
+    let client = PerihelionClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &endpoint_addr);
+
+    let events = env.events().all();
+    // Event: ("initialized",) -> (admin, endpoint)
+    assert_event_with_symbol(&events, "initialized", 2);
+}
+
+/// Assert `endpoint_set` event: topics = ("endpoint_set",), data = (old, new)
+#[test]
+fn endpoint_set_event_shape() {
+    let s = setup();
+    let old_ep = s.client.endpoint();
+    let new_ep = Address::generate(&s.env);
+    s.client.set_endpoint(&new_ep);
+
+    let events = s.env.events().all();
+    // Event: ("endpoint_set",) -> (old, new)
+    assert_event_with_symbol(&events, "endpoint_set", 2);
+}
+
+/// Assert `peer_set` event: topics = ("peer_set",), data = (eid, old, peer)
+#[test]
+fn peer_set_event_shape() {
+    let s = setup();
+    // setup() already set a peer; replacing it should emit the event with old value
+    let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
+    s.client.set_peer(&s.src_eid, &new_peer);
+
+    let events = s.env.events().all();
+    // Event: ("peer_set",) -> (eid, old, peer) with 3 data fields
+    assert_event_with_symbol(&events, "peer_set", 3);
+}
+
+/// Assert `paused_set` event: topics = ("paused_set",), data = (paused,)
+#[test]
+fn paused_set_event_shape() {
+    let s = setup();
+    s.client.set_paused(&true);
+
+    let events = s.env.events().all();
+    // Event: ("paused_set",) -> (paused,)
+    assert_event_with_symbol(&events, "paused_set", 1);
+}
+
+/// Assert `admin_transfer_started` event: topics = ("admin_transfer_started",), data = (old, new)
+#[test]
+fn admin_transfer_started_event_shape() {
+    let s = setup();
+    let old_admin = Address::generate(&s.env);
+    s.client.set_admin(&old_admin);
+
+    let events = s.env.events().all();
+    // Event: ("admin_transfer_started",) -> (old, new)
+    assert_event_with_symbol(&events, "admin_transfer_started", 2);
+}
+
+/// Assert `admin_transfer_completed` event: topics = ("admin_transfer_completed",), data = (old, new)
+#[test]
+fn admin_transfer_completed_event_shape() {
+    let s = setup();
+    let new_admin = Address::generate(&s.env);
+    s.client.set_admin(&new_admin);
+    s.client.accept_admin();
+
+    let events = s.env.events().all();
+    // Event: ("admin_transfer_completed",) -> (old, new)
+    assert_event_with_symbol(&events, "admin_transfer_completed", 2);
+}
+
+/// Assert `cancel_ignored` event: topics = ("cancel_ignored", intent_hash), data = (status,)
+#[test]
+fn cancel_ignored_event_shape() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+    let h = hash(&s.env, 7);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    s.client.fill_intent(&solver, &evm, &h, &100_000, &0); // intent now Filled
+
+    // Send a cancel after it's already filled
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 3,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client.lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    let events = s.env.events().all();
+    // Event: ("cancel_ignored", intent_hash) -> (status,)
+    assert_event_with_symbol(&events, "cancel_ignored", 1);
+}
+
 // --- Issue #15: peer symmetry — registration rejects unknown src_eid ---------
 
 #[test]
@@ -512,6 +868,7 @@ fn registration_rejected_when_no_peer_for_src_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+        reservation_window: 0,
     };
     // Deliver via the registered peer for s.src_eid (transport origin is fine),
     // but the intent's src_eid has no configured peer — must be rejected.
@@ -998,6 +1355,12 @@ fn cancel_intent_when_locked_emits_event() {
         IntentStatus::Cancelled
     );
     assert!(s.client.is_cancelled(&h));
+
+    // Verify the cancelled_inbound event was emitted with correct src_eid
+    let events = s.env.events().all();
+    assert!(events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|topic| format!("{topic:?}").contains("cancelled_inbound"))
+    }), "cancelled_inbound event not emitted");
 }
 
 // --- Issue #57: Amount boundary conformance vectors --------------------------

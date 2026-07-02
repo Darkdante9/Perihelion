@@ -17,6 +17,7 @@ import { evaluate } from "./quote.js";
 import { BackoffState } from "./backoff.js";
 import type { Metrics } from "./metrics.js";
 import type { InventoryProvider } from "./inventory.js";
+import { SeenLRU } from "./seen-lru.js";
 
 /** Pluggable execution backend — abstracts the two settlement legs. */
 export interface Executor {
@@ -34,6 +35,14 @@ export interface Logger {
   warn(msg: string, meta?: Record<string, unknown>): void;
   error(msg: string, meta?: Record<string, unknown>): void;
 }
+
+// ---------------------------------------------------------------------------
+// LRU + TTL cache for the seen set
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// LRU cache for signature verification results
+// ---------------------------------------------------------------------------
 
 /**
  * Throw inside tick() (or any code it calls) to signal a non-recoverable
@@ -85,22 +94,48 @@ class VerificationCache {
   }
 }
 
-const MAX_FILL_RETRIES = 5;
+// ---------------------------------------------------------------------------
+// Retry state
+// ---------------------------------------------------------------------------
+
+const MAX_FILL_RETRIES = 3;
 
 function retryBackoff(attempt: number): number {
-  return Math.min(500 * 2 ** attempt, 30_000);
+  // Exponential backoff: 1s, 2s, 4s …
+  return 1_000 * Math.pow(2, attempt);
 }
+
+interface RetryState {
+  attempts: number;
+  nextRetryAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// Solver
+// ---------------------------------------------------------------------------
 
 export class Solver {
   private readonly client: PerihelionClient;
+
   /**
-   * `seen` only contains hashes whose outcome is terminal (filled, skipped for
-   * a durable reason, or exhausted retries). Transient failures are tracked in
-   * `retryState` and remain eligible for reconsideration.
+   * `seen` tracks hashes whose outcome is terminal (filled, invalid signature,
+   * or exhausted retries).  Bounded by LRU eviction (capacity cap) and TTL
+   * eviction (past-deadline entries are removed every tick).
+   *
+   * ## Memory characteristics
+   *
+   * A 66-char hex string + metadata ≈ 150 bytes per entry.
+   * Default maxSize = 50,000 → ~7.5 MB worst-case.
+   *
+   * ## Restart behaviour
+   *
+   * `seen` is in-memory only; it resets on restart.  This is safe because the
+   * executor is idempotent — it checks on-chain state before re-submitting.
+   * See {@link SeenLRU} for the full restart-safety rationale.
    */
-  private readonly seen = new Set<string>();
-  private readonly retryState = new Map<string, { attempts: number; nextRetryAt: number }>();
+  private readonly seen: SeenLRU;
   private readonly verificationCache: VerificationCache;
+  private readonly retryState = new Map<string, RetryState>();
   private running = false;
   private readonly backoff: BackoffState;
   /** Resolves an in-progress interruptibleSleep early when stop() is called. */
@@ -115,7 +150,8 @@ export class Solver {
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
-    this.verificationCache = new VerificationCache(config.verificationCacheSize);
+    this.seen = new SeenLRU(config.seenCacheSize ?? 50_000);
+    this.verificationCache = new VerificationCache(config.verificationCacheSize ?? 10_000);
   }
 
   /**
@@ -163,6 +199,15 @@ export class Solver {
 
   /** One poll-evaluate-fill cycle. Exposed for testing. */
   async tick(): Promise<void> {
+    // Proactively evict past-deadline entries to reclaim memory.
+    const evicted = this.seen.evictExpired();
+    if (evicted > 0) {
+      this.log.info("evicted expired seen-set entries", {
+        evicted,
+        seenSize: this.seen.size(),
+      });
+    }
+
     const pending = await this.client.listPending();
     const now = Date.now();
     for (const record of pending) {
@@ -179,7 +224,11 @@ export class Solver {
   private async consider(record: IntentRecord): Promise<void> {
     const { intent, signature, hash } = record;
 
-    // Verify the mempool's hash matches our recomputation
+    // Compute deadline in ms for the seen-set TTL.
+    // intent.deadline is seconds since epoch.
+    const deadlineMs = Number(intent.deadline) * 1_000;
+
+    // Verify the mempool's hash matches our recomputation.
     const domain = perihelionDomain(this.config.sourceChainId, this.config.escrowAddress);
     const recomputedHash = hashIntent(intent, domain);
     if (recomputedHash.toLowerCase() !== hash.toLowerCase()) {
@@ -190,10 +239,9 @@ export class Solver {
       return;
     }
 
-    // Check cache first to avoid redundant verification
+    // Check cache first to avoid redundant verification.
     let valid = this.verificationCache.get(hash);
     if (valid === undefined) {
-      // Not cached — verify and cache the result
       valid = await verifyIntent(intent, signature, domain);
       this.verificationCache.set(hash, valid);
     }
@@ -201,7 +249,7 @@ export class Solver {
     if (!valid) {
       this.log.warn("rejecting intent with invalid signature", { hash });
       // Terminal: invalid signature will never become valid.
-      this.seen.add(hash);
+      this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
       return;
     }
@@ -223,19 +271,23 @@ export class Solver {
         BigInt(intent.minDestAmount),
         decision.profitBps ?? 0,
       );
+      // Terminal: filled successfully.
+      this.seen.add(hash, deadlineMs);
+      this.retryState.delete(hash);
     } catch (err) {
       if (err instanceof FatalError) throw err;
       this.log.error("fill failed", { hash, err: String(err) });
       this.metrics?.recordFillLost(intent.destAsset, String(err));
+      this.scheduleRetry(hash, deadlineMs);
     }
   }
 
-  private scheduleRetry(hash: string): void {
+  private scheduleRetry(hash: string, deadlineMs: number): void {
     const state = this.retryState.get(hash) ?? { attempts: 0, nextRetryAt: 0 };
     const attempts = state.attempts + 1;
     if (attempts > MAX_FILL_RETRIES) {
       this.log.warn("max retries exhausted, retiring intent", { hash, attempts });
-      this.seen.add(hash);
+      this.seen.add(hash, deadlineMs);
       this.retryState.delete(hash);
     } else {
       this.retryState.set(hash, {
@@ -254,6 +306,9 @@ export class Solver {
       };
     });
   }
+
+  /** Expose pricing deps for testing — set by subclasses or tests. */
+  protected readonly pricingDeps: Parameters<typeof evaluate>[2] = undefined;
 }
 
 function sleep(ms: number): Promise<void> {

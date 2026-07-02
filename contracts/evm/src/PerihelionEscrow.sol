@@ -32,6 +32,26 @@ import {
 ///      balance. The `skim` function recovers surplus that cannot be attributed
 ///      to any active lock (e.g., from a rebase-up). Rebase-down scenarios can
 ///      result in stuck funds — operators should gate listed assets accordingly.
+///
+///      ## Event Shape Specification (issue #102)
+///      Events are the off-chain integration surface for indexers, relayers, and
+///      monitoring tooling. Each event shape below is a VERSIONED INTERFACE.
+///      Changes to event topics or payloads MUST be reflected in the Soroban
+///      contract (see `contracts/soroban/settlement/src/lib.rs`).
+///
+///      | Event                  | Topics                                              | Data                          |
+///      |------------------------|-----------------------------------------------------|-------------------------------|
+///      | Locked                 | intentHash, solver, user                             | asset, amount                 |
+///      | Released               | intentHash, solver, user                             | amount, fillAmount, fillLedger |
+///      | Refunded               | intentHash, user, reason                             | amount                        |
+///      | PeerSet                | -                                                   | peer                          |
+///      | ConfirmationGraceSet   | -                                                   | secondsGrace                  |
+///      | GuardianSet            | guardian                                            | -                             |
+///      | PausedSet              | -                                                   | paused                        |
+///      | OwnershipTransferStart | previousOwner, newOwner                               | -                             |
+///      | OwnershipTransferred   | previousOwner, newOwner                               | -                             |
+///      | OwnershipTransferCancel| previousOwner                                         | -                             |
+///      | Skimmed                | token, to                                           | amount                        |
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
@@ -91,17 +111,17 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Cancel reason codes (shared taxonomy with the Soroban side) --------
 
     /// @dev Known cancel reason codes, mirroring the Soroban side.
-    uint8 private constant CANCEL_REASON_EXPIRED       = 0x00;
-    uint8 private constant CANCEL_REASON_ADMIN         = 0x01;
-    uint8 private constant CANCEL_REASON_INVALID       = 0x02;
+    uint8 private constant CANCEL_REASON_EXPIRED = 0x00;
+    uint8 private constant CANCEL_REASON_ADMIN = 0x01;
+    uint8 private constant CANCEL_REASON_INVALID = 0x02;
     /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
     ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
     uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
 
-    bytes1 private constant PROTOCOL_VERSION     = 0x01;
+    bytes1 private constant PROTOCOL_VERSION = 0x01;
     bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
-    bytes1 private constant MSG_FILL_CONFIRMED   = 0x02;
-    bytes1 private constant MSG_CANCEL_INTENT    = 0x03;
+    bytes1 private constant MSG_FILL_CONFIRMED = 0x02;
+    bytes1 private constant MSG_CANCEL_INTENT = 0x03;
 
     /// @notice Upper bound on `confirmationGrace`, so a misconfigured admin can
     ///         never strand a user's local refund indefinitely.
@@ -113,6 +133,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         delivered on Stellar, leaving the solver unrepaid.
     uint256 public constant MIN_CONFIRMATION_GRACE = 30 minutes;
 
+    /// @notice Duration a guardian-initiated pause auto-expires without owner
+    ///         ratification, and the matching cooldown before the guardian may
+    ///         pause again after a TTL-dismissed pause. Together these bound the
+    ///         worst-case DoS duty cycle to ≤50 % if the guardian key leaks.
+    uint256 public constant GUARDIAN_PAUSE_TTL = 72 hours;
+
+    /// @notice Maximum byte length of `Intent.destination`. A Stellar strkey
+    ///         (G.../C...) is exactly 56 characters; longer values are invalid.
+    ///         Enforced pre-dispatch so an oversized string cannot inflate the
+    ///         LayerZero fee or cause a decode failure on the Soroban side.
+    uint256 public constant MAX_DESTINATION_LEN = 56;
+    /// @notice Maximum byte length of `Intent.destAsset`. The longest valid form
+    ///         is `<CODE>:<ISSUER>` (12 + 1 + 56 = 69 bytes); `"native"` is 6.
+    uint256 public constant MAX_DEST_ASSET_LEN = 69;
 
     // --- Immutable / config --------------------------------------------------
 
@@ -208,7 +242,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         address indexed solver,
         uint256 amount,
         uint128 fillAmount,
-        uint64  fillLedger
+        uint64 fillLedger
     );
     event Refunded(bytes32 indexed intentHash, address indexed user, uint256 amount, uint8 reason);
     event PeerSet(bytes32 peer);
@@ -277,6 +311,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Constructor ---------------------------------------------------------
 
+    /// @notice Deploy the escrow, binding it to a LayerZero endpoint and Stellar
+    ///         destination. Sets the deployer as the initial owner.
+    /// @param _endpoint Trusted LayerZero endpoint address.
+    /// @param _stellarEid LayerZero endpoint id for the Stellar settlement contract.
     constructor(address _endpoint, uint32 _stellarEid) {
         if (_endpoint == address(0)) revert ZeroAddress();
         endpoint = ILayerZeroEndpoint(_endpoint);
@@ -298,6 +336,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Admin ---------------------------------------------------------------
 
     /// @notice Set the trusted Stellar settlement peer.
+    /// @param peer 32-byte LayerZero address of the trusted Stellar settlement OApp.
     function setPeer(bytes32 peer) external onlyOwner {
         stellarPeer = peer;
         emit PeerSet(peer);
@@ -306,6 +345,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Tune the local-refund grace period. Bounded by MIN_CONFIRMATION_GRACE
     ///         (so a cancel cannot race an in-flight FillConfirmed) and
     ///         MAX_CONFIRMATION_GRACE (so a misconfiguration cannot strand refunds).
+    /// @param secondsGrace New grace period in seconds; must be in [MIN_CONFIRMATION_GRACE, MAX_CONFIRMATION_GRACE].
     function setConfirmationGrace(uint256 secondsGrace) external onlyOwner {
         if (secondsGrace > MAX_CONFIRMATION_GRACE) revert GraceTooLong();
         if (secondsGrace < MIN_CONFIRMATION_GRACE) revert GraceTooShort();
@@ -314,6 +354,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Set (or clear) the emergency guardian. Owner-only.
+    /// @param newGuardian Address of the new guardian (use address(0) to clear).
     function setGuardian(address newGuardian) external onlyOwner {
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
@@ -324,6 +365,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Owner calling this clears any guardian-initiated expiry — if called
     ///         with `true` the pause becomes indefinite; if `false` it also resets
     ///         the guardian cooldown so the guardian remains operational.
+    /// @param _paused True to halt new locks and local refunds; false to resume.
     function setPaused(bool _paused) external onlyOwner {
         paused = _paused;
         guardianPauseExpiry = 0; // owner takes full control; no auto-expiry
@@ -366,6 +408,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         {acceptOwnership} to take effect. To cancel a pending handover
     ///         with a clear event, use {cancelOwnershipTransfer} instead of
     ///         passing `address(0)`.
+    /// @param newOwner Address to propose as the new owner.
     function transferOwnership(address newOwner) external onlyOwner {
         pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner, newOwner);
@@ -395,6 +438,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         contract is NOT compatible with rebasing/deflationary tokens; this
     ///         function is provided only to recover surplus that cannot be attributed
     ///         to any active lock. Owner-only.
+    /// @param token ERC-20 token to recover.
+    /// @param to Recipient address.
+    /// @param amount Amount to transfer.
     function skim(address token, address to, uint256 amount) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
         _safeTransfer(token, to, amount);
@@ -411,6 +457,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      standard V2 convention. Callers should still use {quoteFee} to minimise
     ///      over-payment rather than relying on endpoint refunds.
     ///      The user must have approved this contract for `sourceAmount` of `sourceAsset`.
+    /// @param intent The user's signed intent specifying bridge parameters.
+    /// @param signature EIP-712 signature over the intent by intent.user.
     function lock(Intent calldata intent, bytes calldata signature)
         external
         payable
@@ -548,6 +596,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @notice Permissionless local refund if no settlement landed within
     ///         `deadline + confirmationGrace`. Shares the terminal-flag guard with
     ///         the release path so exactly one terminal transition wins (I1/I2).
+    /// @param intentHash The keccak256 intent commitment identifying the lock.
     function cancelExpired(bytes32 intentHash) external nonReentrant whenNotPaused {
         Lock storage l = locks[intentHash];
         if (l.user == address(0)) revert NotLocked();
@@ -565,10 +614,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Solvers should call this off-chain and pass the result (with a small
     ///         buffer) as `msg.value` to {lock}. Any excess is refunded by the
     ///         endpoint to the caller per the LayerZero V2 convention.
+    /// @param intent Intent whose FillInstruction message size determines the fee.
+    /// @return nativeFee Estimated native token fee in wei.
     function quoteFee(Intent calldata intent) external view returns (uint256 nativeFee) {
         // Use a placeholder hash — the fee depends only on message size, not content.
-        bytes memory message =
-            _encodeFillInstruction(bytes32(0), intent, intent.sourceAmount);
+        bytes memory message = _encodeFillInstruction(bytes32(0), intent, intent.sourceAmount);
         MessagingParams memory params = MessagingParams({
             dstEid: stellarEid, receiver: stellarPeer, message: message, nativeFee: 0
         });
@@ -576,6 +626,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     /// @notice Compute the canonical EIP-712 intent hash (I5).
+    /// @param intent The intent to hash.
+    /// @return The EIP-712 struct hash.
     function hashIntent(Intent calldata intent) public view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
@@ -600,17 +652,21 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Wallets and off-chain tooling can call this to construct the domain
     ///         separator without hard-coding values, and to detect contract/chain
     ///         mismatches before signing.
-    function eip712Domain() external view returns (
-        bytes1 fields,
-        string memory name,
-        string memory version,
-        uint256 chainId,
-        address verifyingContract,
-        bytes32 salt,
-        uint256[] memory extensions
-    ) {
+    function eip712Domain()
+        external
+        view
+        returns (
+            bytes1 fields,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+            uint256[] memory extensions
+        )
+    {
         return (
-            bytes1(0x0f),    // bits 0-3: name + version + chainId + verifyingContract
+            bytes1(0x0f), // bits 0-3: name + version + chainId + verifyingContract
             "Perihelion",
             "1",
             block.chainid,
@@ -635,7 +691,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///
     ///      The `received` (locked amount) is NOT transmitted; Stellar determines the
     ///      fill amount independently via the solver's `fill_intent` call.
-    function _encodeFillInstruction(bytes32 intentHash, Intent calldata intent, uint256 /*received*/)
+    function _encodeFillInstruction(
+        bytes32 intentHash,
+        Intent calldata intent,
+        uint256 /*received*/
+    )
         internal
         view
         returns (bytes memory)
@@ -647,7 +707,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes memory destAssetBytes = bytes(intent.destAsset);
         // Copy up to 32 bytes; extra bytes are truncated (spec requires exactly 32).
         assembly {
-            recipient    := mload(add(destBytes,     32))
+            recipient := mload(add(destBytes, 32))
             destAssetWord := mload(add(destAssetBytes, 32))
         }
 
@@ -655,15 +715,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         bytes32 solverWord = bytes32(uint256(uint160(intent.preferredSolver)));
 
         return abi.encodePacked(
-            PROTOCOL_VERSION,                   // 1  byte  offset 0
-            MSG_FILL_INSTRUCTION,               // 1  byte  offset 1
-            intentHash,                         // 32 bytes offset 2
-            uint32(stellarEid),                 // 4  bytes offset 34
-            recipient,                          // 32 bytes offset 38
-            destAssetWord,                      // 32 bytes offset 70
-            uint128(intent.minDestAmount),      // 16 bytes offset 102
-            uint64(intent.deadline),            // 8  bytes offset 118
-            solverWord                          // 32 bytes offset 126
+            PROTOCOL_VERSION, // 1  byte  offset 0
+            MSG_FILL_INSTRUCTION, // 1  byte  offset 1
+            intentHash, // 32 bytes offset 2
+            uint32(stellarEid), // 4  bytes offset 34
+            recipient, // 32 bytes offset 38
+            destAssetWord, // 32 bytes offset 70
+            uint128(intent.minDestAmount), // 16 bytes offset 102
+            uint64(intent.deadline), // 8  bytes offset 118
+            solverWord // 32 bytes offset 126
             //                                  total       158
         );
     }
@@ -688,13 +748,15 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         pure
         returns (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger)
     {
-        if (m.length != 90) revert MalformedPayload();
+        if (m.length != 90) {
+            revert MalformedPayload();
+        }
         bytes32 hashWord;
         bytes32 solverWord;
         bytes32 amountWord;
         bytes32 ledgerWord;
         assembly {
-            hashWord   := calldataload(add(m.offset, 2))
+            hashWord := calldataload(add(m.offset, 2))
             solverWord := calldataload(add(m.offset, 34))
             // offset 66: 16-byte amount occupies the high 16 bytes of the 32-byte load.
             amountWord := calldataload(add(m.offset, 66))
@@ -707,6 +769,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // truncate to a different address, potentially redirecting funds.
         if (uint256(solverWord) >> 160 != 0) revert MalformedPayload();
         solverEvm = address(uint160(uint256(solverWord)));
+        // High 16 bytes of the 32-byte word loaded at offset 66.
+        fillAmount = uint128(uint256(amountWord >> 128));
+        // High 8 bytes of the 32-byte word loaded at offset 82.
+        fillLedger = uint64(uint256(ledgerWord >> 192));
     }
 
     /// @dev Decode a 35-byte CancelIntent:
@@ -725,9 +791,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         intentHash = hashWord;
         reason = uint8(m[34]);
         if (
-            reason != CANCEL_REASON_EXPIRED &&
-            reason != CANCEL_REASON_ADMIN &&
-            reason != CANCEL_REASON_INVALID
+            reason != CANCEL_REASON_EXPIRED && reason != CANCEL_REASON_ADMIN
+                && reason != CANCEL_REASON_INVALID
         ) revert MalformedPayload();
     }
 
