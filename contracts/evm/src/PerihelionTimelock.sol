@@ -35,6 +35,12 @@ contract PerihelionTimelock {
     ///         the operation must be re-proposed, so a stale-but-confirmed op
     ///         cannot be executed arbitrarily far in the future.
     uint256 public constant GRACE_PERIOD = 14 days;
+    /// @notice Minimum configurable delay. Prevents accidental or
+    ///         governance-attack setting of a dangerously short delay.
+    uint256 public constant MIN_DELAY = 1 hours;
+    /// @notice Maximum configurable delay. Prevents a malicious owner from
+    ///         locking all governance actions behind an unreasonably long wait.
+    uint256 public constant MAX_DELAY = 30 days;
 
     /// @notice Floor on `delay`: prevents a confirmed `setDelay` from
     ///         self-neutralizing the timelock's reaction window.
