@@ -12,10 +12,6 @@ export class IntentStore {
     return this.records.get(hash);
   }
 
-  getByStatus(status: IntentStatus): MempoolIntentRecord[] {
-    return Array.from(this.records.values()).filter((r) => r.status === status);
-  }
-
   updateStatus(hash: Hex, status: IntentStatus): boolean {
     const record = this.records.get(hash);
     if (!record) return false;
