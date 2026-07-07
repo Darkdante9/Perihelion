@@ -8,7 +8,7 @@ import { InFlightTracker } from "../src/inventory.js";
 import type { InventoryProvider } from "../src/inventory.js";
 
 const config = loadConfig({
-  PERIHELION_SUPPORTED_ASSETS: "native,USDC:GA5Z",
+  PERIHELION_SUPPORTED_ASSETS: "native,USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   PERIHELION_MIN_MARGIN_BPS: "10",
 });
 
@@ -25,11 +25,11 @@ const usdcDeps: PricingDeps = {
 function intent(overrides: Partial<Parameters<typeof buildIntent>[0]> = {}) {
   return buildIntent({
     user: "0x0000000000000000000000000000000000000001",
-    destination: "GUSER",
+    destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
     sourceChainId: 8453,
     sourceAsset: "0x0000000000000000000000000000000000000002",
     sourceAmount: "1000000",     // 1 USDC (6dp)
-    destAsset: "USDC:GA5Z",
+    destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
     minDestAmount: "9900000",   // 0.99 USDC (7dp) — leaves ~100_000 margin
     deadline: 4102444800,
     ...overrides,
@@ -45,7 +45,7 @@ test("fills a profitable, supported intent", async () => {
 });
 
 test("rejects unsupported dest asset (terminal)", async () => {
-  const decision = await evaluate(intent({ destAsset: "EURC:GBBB" }), config, usdcDeps);
+  const decision = await evaluate(intent({ destAsset: "EURC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }), config, usdcDeps);
   assert.equal(decision.fill, false);
   assert.equal(decision.terminal, true);
 });
@@ -57,7 +57,9 @@ test("rejects when minDestAmount cannot be met (transient)", async () => {
 });
 
 test("rejects expired intents (terminal)", async () => {
-  const decision = await evaluate(intent({ deadline: 1 }), config, usdcDeps);
+  // buildIntent rejects past deadlines, so build a valid intent then expire it.
+  const expired = { ...intent(), deadline: 1 };
+  const decision = await evaluate(expired, config, usdcDeps);
   assert.equal(decision.fill, false);
   assert.equal(decision.reason, "intent expired");
   assert.equal(decision.terminal, true);
@@ -175,7 +177,7 @@ test("evaluate: skips when in-flight fills over-commit balance", async () => {
   // Deliverable for the intent is 10_000_000 (1 USDC at 7dp).
   // Balance is 10_000_000 but we've already reserved 1n more than available.
   const tracker = new InFlightTracker();
-  tracker.reserve("USDC:GA5Z", 10_000_000n);
+  tracker.reserve("USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", 10_000_000n);
   const decision = await evaluate(intent(), config, fixedInventory(10_000_000n), tracker);
   assert.equal(decision.fill, false);
   assert.equal(decision.reason, "insufficient inventory");

@@ -236,9 +236,9 @@ export class EVMSourceWatcher implements SourceWatcher {
     let _asset: string;
     let _amount: bigint;
     try {
-      const [decoded] = decodeAbiParameters(LOCKED_DATA_PARAMS, log.data as Hex);
-      _asset  = decoded.asset as string;
-      _amount = decoded.amount as bigint;
+      const [asset, amount] = decodeAbiParameters(LOCKED_DATA_PARAMS, log.data as Hex);
+      _asset  = asset as string;
+      _amount = amount as bigint;
     } catch {
       return null;
     }

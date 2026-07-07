@@ -36,6 +36,13 @@ export interface Logger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
+/**
+ * Signature-verification seam. Defaults to the SDK's {@link verifyIntent};
+ * injectable so tests can drive verification outcomes and count invocations
+ * (the ESM namespace itself is frozen and cannot be monkeypatched).
+ */
+export type IntentVerifier = typeof verifyIntent;
+
 // ---------------------------------------------------------------------------
 // LRU + TTL cache for the seen set
 // ---------------------------------------------------------------------------
@@ -52,7 +59,7 @@ export interface Logger {
  * orchestrator.
  */
 export class FatalError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(message: string, override readonly cause?: unknown) {
     super(message);
     this.name = "FatalError";
   }
@@ -147,6 +154,7 @@ export class Solver {
     private readonly log: Logger = console,
     private readonly metrics?: Metrics,
     private readonly inventory?: InventoryProvider,
+    private readonly verifier: IntentVerifier = verifyIntent,
   ) {
     this.client = new PerihelionClient({ mempoolUrl: config.mempoolUrl });
     this.backoff = new BackoffState(config);
@@ -242,7 +250,7 @@ export class Solver {
     // Check cache first to avoid redundant verification.
     let valid = this.verificationCache.get(hash);
     if (valid === undefined) {
-      valid = await verifyIntent(intent, signature, domain);
+      valid = await this.verifier(intent, signature, domain);
       this.verificationCache.set(hash, valid);
     }
 

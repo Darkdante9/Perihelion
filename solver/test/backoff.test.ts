@@ -56,7 +56,8 @@ test("recordSuccess resets the failure counter", () => {
 });
 
 test("default maxJitterMs is 25% of base interval", () => {
-  const b = new BackoffState({ pollIntervalMs: BASE }, () => 1); // rng=1 gives max jitter
-  // maxJitterMs = floor(1000 * 0.25) = 250; jitter = floor(1 * 251) = 251
+  // rng() is contractually in [0, 1); use a near-1 value to exercise max jitter.
+  const b = new BackoffState({ pollIntervalMs: BASE }, () => 0.999);
+  // maxJitterMs = floor(1000 * 0.25) = 250; jitter = floor(0.999 * 251) = 250
   assert.ok(b.nextDelay() <= BASE + 250);
 });

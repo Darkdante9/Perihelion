@@ -8,6 +8,7 @@ import {
   DEFAULT_V_MIN,
   hashIntent,
   I128_MAX,
+  IntentValidationError,
   perihelionDomain,
   U128_MAX,
   validateAmount,
@@ -27,6 +28,8 @@ const DOMAIN = perihelionDomain(CHAIN_ID, CONTRACT_ADDRESS);
 
 // A valid G... Stellar account strkey (56 chars, base32 A-Z/2-7).
 const VALID_DESTINATION = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+// A valid Stellar asset: "<CODE>:<G...ISSUER>" using the strkey above as issuer.
+const VALID_DEST_ASSET = `USDC:${VALID_DESTINATION}`;
 
 function sampleParams() {
   return {
@@ -230,7 +233,7 @@ test("buildIntent rejects sourceAmount of zero", () => {
     () =>
       buildIntent({
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "0",
@@ -238,7 +241,9 @@ test("buildIntent rejects sourceAmount of zero", () => {
         minDestAmount: "1",
         deadline: 4102444800,
       }),
-    RangeError
+    // Zero fails the positive-integer format check before the range check,
+    // so it surfaces as an IntentValidationError rather than a RangeError.
+    IntentValidationError
   );
 });
 
@@ -247,7 +252,7 @@ test("buildIntent rejects minDestAmount exceeding i128::MAX", () => {
     () =>
       buildIntent({
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: "1000000",
@@ -265,7 +270,7 @@ test("buildIntent rejects sourceAmount exceeding u128::MAX", () => {
       buildIntent(
         {
           user: account.address,
-          destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+          destination: VALID_DESTINATION,
           sourceChainId: 8453,
           sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
           sourceAmount: (U128_MAX + 1n).toString(),
@@ -284,7 +289,7 @@ test("buildIntent accepts sourceAmount = u128::MAX (exact boundary)", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: U128_MAX.toString(),
@@ -302,7 +307,7 @@ test("buildIntent accepts minDestAmount = i128::MAX (exact boundary)", () => {
     buildIntent(
       {
         user: account.address,
-        destination: "GUSERSTELLARADDRESSPLACEHOLDER",
+        destination: VALID_DESTINATION,
         sourceChainId: 8453,
         sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         sourceAmount: I128_MAX.toString(),

@@ -1,12 +1,17 @@
 import express, { type Request, Response } from "express";
-import { hashIntent, verifyIntent } from "@perihelion/sdk";
-import type { Hex, SignedIntent } from "@perihelion/sdk";
+import type { Server } from "node:http";
+import { hashIntent, verifyIntent, perihelionDomain } from "@perihelion/sdk";
+import type { Hex, SignedIntent, Address } from "@perihelion/sdk";
 import { IntentStore } from "./store.js";
 import type { MempoolIntentRecord, IntentStatus } from "./types.js";
 
 export interface MempoolServerOptions {
   port?: number;
   host?: string;
+  /** EVM chain ID the escrow is deployed on. Binds the EIP-712 domain. */
+  chainId?: number;
+  /** PerihelionEscrow contract address. Binds the EIP-712 domain. */
+  verifyingContract?: Address;
 }
 
 export class MempoolServer {
@@ -14,10 +19,16 @@ export class MempoolServer {
   private store = new IntentStore();
   private port: number;
   private host: string;
+  private domain: ReturnType<typeof perihelionDomain>;
+  private server?: Server;
 
   constructor(opts: MempoolServerOptions = {}) {
     this.port = opts.port ?? 3000;
     this.host = opts.host ?? "localhost";
+    this.domain = perihelionDomain(
+      opts.chainId ?? 8453,
+      opts.verifyingContract ?? "0x0000000000000000000000000000000000000000",
+    );
     this.setupRoutes();
   }
 
@@ -39,13 +50,13 @@ export class MempoolServer {
       }
 
       // Verify EIP-712 signature
-      const isValid = await verifyIntent(signed.intent, signed.signature);
+      const isValid = await verifyIntent(signed.intent, signed.signature, this.domain);
       if (!isValid) {
         res.status(400).json({ error: "Invalid signature" });
         return;
       }
 
-      const hash = hashIntent(signed.intent);
+      const hash = hashIntent(signed.intent, this.domain);
       const record: MempoolIntentRecord = {
         hash,
         intent: signed.intent,
@@ -86,10 +97,22 @@ export class MempoolServer {
 
   start(): Promise<void> {
     return new Promise((resolve) => {
-      this.app.listen(this.port, this.host, () => {
+      this.server = this.app.listen(this.port, this.host, () => {
         console.log(`Mempool server listening on http://${this.host}:${this.port}`);
         resolve();
       });
+    });
+  }
+
+  /** Stop the HTTP listener. Resolves once the server has closed. */
+  stop(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.server) {
+        resolve();
+        return;
+      }
+      this.server.close((err) => (err ? reject(err) : resolve()));
+      this.server = undefined;
     });
   }
 

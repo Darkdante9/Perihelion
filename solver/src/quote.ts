@@ -63,10 +63,11 @@ const KNOWN_DECIMALS: Record<string, number> = {
 /** Fallback decimal lookup: known table → 7dp for Stellar assets → error. */
 export const defaultDecimalsLookup: DecimalsLookup = (assetId: string): number => {
   if (KNOWN_DECIMALS[assetId] !== undefined) return KNOWN_DECIMALS[assetId];
-  // Stellar issued asset: "CODE:ISSUER"
+  // Stellar issued asset: "CODE:ISSUER" uses 7dp.
   if (assetId.includes(":")) return 7;
-  // EVM address (0x...): 6dp is the stablecoin convention; operators must
-  // override for 18dp tokens. Throw to force explicit configuration.
+  // EVM token address (0x...): 6dp is the stablecoin convention on the
+  // documented corridor. Operators must supply a DecimalsLookup for 18dp tokens.
+  if (assetId.startsWith("0x")) return 6;
   throw new Error(
     `[Perihelion] decimals not configured for asset "${assetId}". ` +
     `Provide a DecimalsLookup that returns the correct precision.`,
@@ -162,11 +163,19 @@ export function isSolverEligible(
   );
 }
 
+/**
+ * Third argument to {@link evaluate}: an optional bag of injectable pricing
+ * dependencies that may also double as the inventory provider. Callers can pass
+ * pricing overrides (`priceOracle`/`feeEstimator`/`decimalsLookup`), an
+ * inventory provider (`availableBalance`), or an object satisfying both.
+ */
+export type EvaluateDeps = PricingDeps & Partial<InventoryProvider>;
+
 /** Decide whether to fill an intent given current config and pricing. */
 export async function evaluate(
   intent: Intent,
   config: SolverConfig,
-  inventory: InventoryProvider = new UnlimitedInventoryProvider(),
+  deps: EvaluateDeps = {},
   inFlight?: InFlightTracker,
 ): Promise<FillDecision> {
   // ── terminal checks ──────────────────────────────────────────────────────
@@ -177,29 +186,46 @@ export async function evaluate(
     return { fill: false, reason: `unsupported dest asset ${intent.destAsset}`, terminal: true };
   }
   if (!isSolverEligible(intent.preferredSolver, config.solverAddress)) {
-    return { fill: false, reason: "reserved for another solver" };
+    return { fill: false, reason: "reserved for another solver", terminal: true };
   }
 
+  // ── pricing (transient failures → non-terminal skip so we retry later) ────
+  let proceeds: bigint;
+  let fees: bigint;
+  try {
+    proceeds = await computeProceeds(intent, deps);
+    fees = await (deps.feeEstimator ?? defaultFeeEstimator)(intent);
+  } catch (err) {
+    return { fill: false, reason: `pricing error: ${String(err)}`, terminal: false };
+  }
+
+  // The solver must deliver at least minDestAmount of the dest asset.
   const minOut = BigInt(intent.minDestAmount);
   if (proceeds < minOut) {
     return { fill: false, reason: "cannot meet minDestAmount", terminal: false };
   }
 
   // ── profit check ─────────────────────────────────────────────────────────
-  // profit = proceeds - delivery - fees
+  // profit = proceeds - deliveryCost - fees, where deliveryCost = minDestAmount
   // profitBps = profit * 10_000 / proceeds
   const profit = proceeds - minOut - fees;
   if (profit <= 0n) {
     return { fill: false, reason: "fee-inclusive profit is non-positive", terminal: false };
   }
+  const profitBps = Number((profit * 10_000n) / proceeds);
 
-  // Inventory check: ensure we can fund the fill after accounting for in-flight fills.
-  const required = deliverable;
+  // ── inventory check ───────────────────────────────────────────────────────
+  // Use the caller-supplied provider if it exposes a balance, else unlimited.
+  const inventory: InventoryProvider =
+    typeof deps.availableBalance === "function"
+      ? (deps as InventoryProvider)
+      : new UnlimitedInventoryProvider();
+  const required = minOut;
   const available = await inventory.availableBalance(intent.destAsset);
   const reserved = inFlight?.reservedFor(intent.destAsset) ?? 0n;
   if (available - reserved < required) {
-    return { fill: false, reason: "insufficient inventory", marginBps };
+    return { fill: false, reason: "insufficient inventory", terminal: false };
   }
 
-  return { fill: true, reason: "profitable", marginBps };
+  return { fill: true, reason: "profitable", terminal: false, profitBps };
 }

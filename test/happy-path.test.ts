@@ -28,9 +28,9 @@ const SETTLEMENT_ADDRESS = "0xSTELLAR";
 
 const USER_ADDRESS = "0x2222222222222222222222222222222222222222";
 const SOLVER_ADDRESS = "0x3333333333333333333333333333333333333333";
-const SOLVER_STELLAR = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+const SOLVER_STELLAR = "GAIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCF6M";
 
-const RECIPIENT_STELLAR = "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const RECIPIENT_STELLAR = "GARCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCEIRCFRVX";
 
 test("happy path: full lifecycle with settlement", async () => {
   // --- Setup ----------------------------------------------------------------
@@ -151,7 +151,7 @@ test("happy path: solver payout address independent of locker", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GA5Z");
+  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -166,7 +166,7 @@ test("happy path: solver payout address independent of locker", async () => {
     sourceChainId: 8453,
     sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5Z",
+    destAsset: "USDC:GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
     minDestAmount: "9900000",
     deadline: Math.floor(Date.now() / 1000) + 3600,
     nonce: "67890",
@@ -206,7 +206,7 @@ test("happy path: two concurrent intents resolve independently", async () => {
   // --- Setup ----------------------------------------------------------------
   const lz = new MockLayerZeroEndpoint();
   const sourceToken = new MockERC20(6);
-  const destAsset = new MockStellarAsset("USDC", "GA5Z");
+  const destAsset = new MockStellarAsset("USDC", "GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6");
 
   const escrow = new MockEscrow(sourceToken, lz, ESCROW_ADDRESS, EVM_EID, STELLAR_EID);
   const settlement = new MockSettlement(destAsset, lz, STELLAR_EID, EVM_EID);
@@ -223,7 +223,7 @@ test("happy path: two concurrent intents resolve independently", async () => {
     sourceChainId: 8453,
     sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5Z",
+    destAsset: "USDC:GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
     minDestAmount: "9900000",
     deadline: Math.floor(Date.now() / 1000) + 3600,
     nonce: "1111",
@@ -237,7 +237,7 @@ test("happy path: two concurrent intents resolve independently", async () => {
     sourceChainId: 8453,
     sourceAsset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     sourceAmount: "1000000",
-    destAsset: "USDC:GA5Z",
+    destAsset: "USDC:GAZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTGMZTHCM6",
     minDestAmount: "9900000",
     deadline: Math.floor(Date.now() / 1000) + 3600,
     nonce: "2222",

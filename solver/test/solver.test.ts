@@ -13,6 +13,7 @@ import {
 } from "@perihelion/sdk";
 import { Solver, FatalError, type Executor, type Logger } from "../src/solver.js";
 import type { SolverConfig } from "../src/config.js";
+import type { InventoryProvider } from "../src/inventory.js";
 
 // Test fixtures
 const CHAIN_ID = 8453;
@@ -35,7 +36,7 @@ const baseConfig: SolverConfig = {
 function buildTestIntent() {
   return buildIntent({
     user: USER_ADDRESS,
-    destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    destination: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
     sourceChainId: CHAIN_ID,
     sourceAsset: "0x0000000000000000000000000000000000000004" as const,
     sourceAmount: "1000000",
@@ -66,7 +67,6 @@ test("verifies signature only once for the same intent hash", async () => {
     return true;
   });
 
-  // Create a custom mock module to intercept verifyIntent
   const mockLogger: Logger = {
     info: () => {},
     warn: () => {},
@@ -84,39 +84,29 @@ test("verifies signature only once for the same intent hash", async () => {
     json: async () => [record],
   })) as any;
 
-  // Temporarily override the SDK's verifyIntent
-  const sdkModule = await import("@perihelion/sdk");
-  const originalVerify = sdkModule.verifyIntent;
-  (sdkModule as any).verifyIntent = mockVerify;
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
 
-  try {
-    const solver = new Solver(baseConfig, mockExecutor, mockLogger);
+  // First tick - should verify
+  await solver.tick();
+  assert.equal(verifyCallCount, 1, "should verify on first encounter");
 
-    // First tick - should verify
-    await solver.tick();
-    assert.equal(verifyCallCount, 1, "should verify on first encounter");
-
-    // Second tick with same intent - should use cache
-    await solver.tick();
-    assert.equal(
-      verifyCallCount,
-      1,
-      "should not verify again for same hash (cached)"
-    );
-  } finally {
-    // Restore original
-    (sdkModule as any).verifyIntent = originalVerify;
-  }
+  // Second tick with same intent - should use cache
+  await solver.tick();
+  assert.equal(
+    verifyCallCount,
+    1,
+    "should not verify again for same hash (cached)"
+  );
 });
 
 test("rejects intent with hash mismatch", async () => {
   const intent = buildTestIntent();
-  const correctHash = hashIntent(intent, domain);
-  const wrongHash = "0xwronghash0000000000000000000000000000000000000000000000000000" as Hex;
+  // A well-formed 32-byte hash that deliberately differs from the real one.
+  const wrongHash = ("0x" + "11".repeat(32)) as Hex;
 
   const record: IntentRecord = {
     intent,
-    signature: "0xvalidsig" as Hex,
+    signature: "0xdeadbeef" as Hex,
     hash: wrongHash, // Mempool returned wrong hash
     status: "pending",
     createdAt: Math.floor(Date.now() / 1000),
@@ -183,36 +173,31 @@ test("caches invalid signatures to avoid re-verification", async () => {
     json: async () => [record],
   })) as any;
 
-  const sdkModule = await import("@perihelion/sdk");
-  const originalVerify = sdkModule.verifyIntent;
-  (sdkModule as any).verifyIntent = mockVerify;
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
 
-  try {
-    const solver = new Solver(baseConfig, mockExecutor, mockLogger);
+  // First tick - should verify and reject
+  await solver.tick();
+  assert.equal(verifyCallCount, 1, "should verify on first encounter");
+  assert.ok(
+    warnings.some((w) => w.includes("invalid signature")),
+    "should warn about invalid signature"
+  );
 
-    // First tick - should verify and reject
-    await solver.tick();
-    assert.equal(verifyCallCount, 1, "should verify on first encounter");
-    assert.ok(
-      warnings.some((w) => w.includes("invalid signature")),
-      "should warn about invalid signature"
-    );
-
-    // Second tick - should use cached rejection
-    warnings.length = 0;
-    await solver.tick();
-    assert.equal(
-      verifyCallCount,
-      1,
-      "should not verify again (cached invalid result)"
-    );
-    assert.ok(
-      warnings.some((w) => w.includes("invalid signature")),
-      "should still reject with cached result"
-    );
-  } finally {
-    (sdkModule as any).verifyIntent = originalVerify;
-  }
+  // Second tick - the intent is now retired in the seen-set (invalid sig is
+  // terminal), so it is short-circuited before verification: no re-verify and
+  // no repeated warning (which would otherwise spam the log every poll).
+  warnings.length = 0;
+  await solver.tick();
+  assert.equal(
+    verifyCallCount,
+    1,
+    "should not verify again (intent retired after invalid signature)"
+  );
+  assert.equal(
+    warnings.length,
+    0,
+    "should not re-warn for an already-rejected intent"
+  );
 });
 
 test("verification cache evicts oldest entries when full", async () => {
@@ -248,78 +233,70 @@ test("verification cache evicts oldest entries when full", async () => {
     error: () => {},
   };
 
+  // A profitable fill would retire the intent into the seen-set, making it
+  // un-re-pollable. This test only exercises the verification cache, so we
+  // starve inventory: every intent is verified, then skipped non-terminally
+  // ("insufficient inventory") and stays re-pollable across ticks.
+  const zeroInventory: InventoryProvider = {
+    availableBalance: async () => 0n,
+  };
+
   const mockExecutor: Executor = {
     fill: async () => ({ settlementTx: "0xfilled" }),
   };
 
-  const sdkModule = await import("@perihelion/sdk");
-  const originalVerify = sdkModule.verifyIntent;
-  (sdkModule as any).verifyIntent = mockVerify;
+  // PerihelionClient captures globalThis.fetch at construction, so we install a
+  // single mock (before constructing the solver) that returns whatever is in
+  // `pendingRecords`, and swap that array between ticks to drive each poll.
+  let pendingRecords: IntentRecord[] = [record1];
+  global.fetch = mock.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => pendingRecords,
+  })) as any;
 
-  try {
-    const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger);
+  const solver = new Solver(smallCacheConfig, mockExecutor, mockLogger, undefined, zeroInventory, mockVerify);
 
-    // Process intent1 and intent2 (fills cache to capacity)
-    global.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [record1],
-    })) as any;
-    await solver.tick();
+  // Process intent1 and intent2 (fills cache to capacity)
+  pendingRecords = [record1];
+  await solver.tick();
 
-    global.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [record2],
-    })) as any;
-    await solver.tick();
+  pendingRecords = [record2];
+  await solver.tick();
 
-    assert.equal(verifiedHashes.length, 2, "should verify both intents");
-    verifiedHashes = [];
+  assert.equal(verifiedHashes.length, 2, "should verify both intents");
+  verifiedHashes = [];
 
-    // Process intent3 (should evict intent1)
-    global.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [record3],
-    })) as any;
-    await solver.tick();
+  // Process intent3 (should evict intent1)
+  pendingRecords = [record3];
+  await solver.tick();
 
-    assert.equal(verifiedHashes.length, 1, "should verify new intent3");
-    verifiedHashes = [];
+  assert.equal(verifiedHashes.length, 1, "should verify new intent3");
+  verifiedHashes = [];
 
-    // Process intent1 again (should re-verify since it was evicted)
-    global.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [record1],
-    })) as any;
-    await solver.tick();
+  // Process intent1 again (should re-verify since it was evicted)
+  pendingRecords = [record1];
+  await solver.tick();
 
-    assert.equal(
-      verifiedHashes.length,
-      1,
-      "should re-verify intent1 after eviction"
-    );
-    assert.equal(verifiedHashes[0], record1.hash, "re-verified intent1");
+  assert.equal(
+    verifiedHashes.length,
+    1,
+    "should re-verify intent1 after eviction"
+  );
+  assert.equal(verifiedHashes[0], record1.hash, "re-verified intent1");
 
-    // Process intent2 again (should still be cached)
-    verifiedHashes = [];
-    global.fetch = mock.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => [record2],
-    })) as any;
-    await solver.tick();
+  // Re-adding intent1 filled the size-2 cache and evicted the current LRU entry
+  // (intent2), leaving {intent3, intent1}. Re-processing intent3 should hit the
+  // cache — proving the most-recently-used survivor was not re-verified.
+  verifiedHashes = [];
+  pendingRecords = [record3];
+  await solver.tick();
 
-    assert.equal(
-      verifiedHashes.length,
-      0,
-      "intent2 should still be cached (not evicted)"
-    );
-  } finally {
-    (sdkModule as any).verifyIntent = originalVerify;
-  }
+  assert.equal(
+    verifiedHashes.length,
+    0,
+    "intent3 should still be cached (not evicted)"
+  );
 });
 
 // ─── Issue 92: FatalError propagation and graceful drain ────────────────────
@@ -391,7 +368,7 @@ test("complete flow: hash validation and cached verification", async () => {
   const correctHash = hashIntent(intent, domain);
   const record: IntentRecord = {
     intent,
-    signature: "0xvalidsignature" as Hex,
+    signature: "0xdeadbeef" as Hex,
     hash: correctHash,
     status: "pending",
     createdAt: Math.floor(Date.now() / 1000),
@@ -424,24 +401,16 @@ test("complete flow: hash validation and cached verification", async () => {
     json: async () => [record],
   })) as any;
 
-  const sdkModule = await import("@perihelion/sdk");
-  const originalVerify = sdkModule.verifyIntent;
-  (sdkModule as any).verifyIntent = mockVerify;
+  const solver = new Solver(baseConfig, mockExecutor, mockLogger, undefined, undefined, mockVerify);
 
-  try {
-    const solver = new Solver(baseConfig, mockExecutor, mockLogger);
+  // First tick: verify and fill
+  await solver.tick();
+  assert.equal(verifyCount, 1, "should verify on first tick");
+  assert.equal(fills.length, 1, "should fill the intent");
+  assert.equal(fills[0], correctHash, "filled correct intent");
 
-    // First tick: verify and fill
-    await solver.tick();
-    assert.equal(verifyCount, 1, "should verify on first tick");
-    assert.equal(fills.length, 1, "should fill the intent");
-    assert.equal(fills[0], correctHash, "filled correct intent");
-
-    // Second tick: use cached verification, but don't fill (seen)
-    await solver.tick();
-    assert.equal(verifyCount, 1, "should not re-verify (cached)");
-    assert.equal(fills.length, 1, "should not fill again (already seen)");
-  } finally {
-    (sdkModule as any).verifyIntent = originalVerify;
-  }
+  // Second tick: use cached verification, but don't fill (seen)
+  await solver.tick();
+  assert.equal(verifyCount, 1, "should not re-verify (cached)");
+  assert.equal(fills.length, 1, "should not fill again (already seen)");
 });

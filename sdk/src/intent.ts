@@ -284,7 +284,20 @@ export function hashIntent(intent: Intent, domain: TypedDataDomain): Hex {
 }
 
 /**
+ * Half of the secp256k1 curve order (n / 2). Per EIP-2, a canonical signature
+ * must have `s <= n/2`; the high-s counterpart (n - s) recovers the same signer
+ * and is therefore malleable. We reject it so each intent has exactly one valid
+ * signature — otherwise replay/dedup keyed on the signature could be bypassed.
+ */
+const SECP256K1_HALF_N =
+  0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n;
+
+/**
  * Recover the signer of an intent and check it matches `intent.user`.
+ *
+ * Rejects EIP-2 non-canonical (high-s) signatures to prevent malleability.
+ * Malformed-length signatures fall through to `recoverTypedDataAddress`, which
+ * rejects them.
  *
  * @param domain  Must be built with {@link perihelionDomain}.
  */
@@ -293,6 +306,13 @@ export async function verifyIntent(
   signature: Hex,
   domain: TypedDataDomain,
 ): Promise<boolean> {
+  // EIP-2 low-s enforcement for canonical 65-byte signatures
+  // ("0x" + r[32] + s[32] + v[1] = 132 hex chars).
+  if (signature.length === 132) {
+    const s = BigInt(`0x${signature.slice(66, 130)}`);
+    if (s > SECP256K1_HALF_N) return false;
+  }
+
   const recovered = await recoverTypedDataAddress({
     domain,
     types: INTENT_TYPES,
