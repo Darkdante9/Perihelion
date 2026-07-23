@@ -79,4 +79,13 @@ the package owner. This is enforced automatically via `.github/CODEOWNERS` and
 branch protection. See [CONTRIBUTING.md](./CONTRIBUTING.md#security-review-policy)
 for the full list of sensitive paths and the rationale for each.
 
+## Dependency and lockfile maintenance
+
+Perihelion runs dependency advisory checks for both the npm-based off-chain
+components and the Soroban Rust workspace in CI. The policy and allowlist
+process are documented in [docs/dependency-policy.md](./docs/dependency-policy.md).
+The repository commits the npm and Soroban lockfiles, but does not commit
+vendored node_modules directories; those are recreated from the lockfile with
+`npm ci`.
+
 Thank you for helping keep Perihelion and its users safe.
