@@ -45,6 +45,12 @@ pub enum PerihelionError {
     AlreadyFilled = 146,
     /// FillInstruction deadline exceeds MAX_DEADLINE_HORIZON from now.
     DeadlineTooFar = 147,
+    /// Intent amount exceeds per-intent maximum cap.
+    ExceedsMaxIntentAmount = 148,
+    /// Rolling-window aggregate cap has been exceeded.
+    RollingWindowCapExceeded = 149,
+    /// Rolling-window cap is triggered; new intents paused until reset.
+    RollingWindowCapTriggered = 150,
 
     // --- Messaging ---
     /// Payload failed structural validation.

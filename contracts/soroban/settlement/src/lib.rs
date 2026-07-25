@@ -245,6 +245,77 @@ impl Perihelion {
         Ok(())
     }
 
+    // --- Value caps (issue #145) -----------------------------------------------
+
+    /// Set the maximum amount a single intent can register. Admin-only.
+    /// Zero means unlimited. Starts conservative; raised as confidence grows.
+    pub fn set_max_intent_amount(env: Env, max_amount: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxIntentAmount, &max_amount);
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        env.events().publish(
+            (Symbol::new(&env, "max_intent_amount_set"),),
+            (max_amount,),
+        );
+        Ok(())
+    }
+
+    /// Set the rolling-window aggregate throughput cap. Admin-only.
+    /// When exceeded, new intents are paused until the admin manually resets.
+    /// Existing in-flight settlement still completes (caps gate only new registrations).
+    ///
+    /// # Parameters
+    /// - `duration`: Duration of each rolling window in seconds (e.g., 86400 for 1 day).
+    ///              Zero disables the rolling-window cap.
+    /// - `cap`: Maximum aggregate registered amount within each window.
+    ///         Zero means unlimited. Ignored if duration is zero.
+    pub fn set_rolling_window_cap(
+        env: Env,
+        duration: u64,
+        cap: i128,
+    ) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowDuration, &duration);
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowCap, &cap);
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_set"),),
+            (duration, cap),
+        );
+        Ok(())
+    }
+
+    /// Admin-only: reset the rolling-window cap trigger if it has been exceeded.
+    /// Can only be called after `rolling_window_reset_earliest_at` to prevent spam.
+    pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        let reset_earliest: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RollingWindowResetEarliestAt)
+            .unwrap_or(0);
+        let now = env.ledger().timestamp();
+        if now < reset_earliest {
+            return Err(PerihelionError::InvalidAmount); // Placeholder; should add dedicated error
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RollingWindowTriggered, &false);
+        env.storage().instance().remove(&DataKey::LatestWindowStart);
+        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        env.events().publish(
+            (Symbol::new(&env, "rolling_window_cap_reset"),),
+            (),
+        );
+        Ok(())
+    }
+
     // --- LayerZero inbound -----------------------------------------------------
 
     /// LayerZero receive hook. Callable only by the configured endpoint, and only
@@ -841,6 +912,72 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Check per-intent and rolling-window value caps. Reverts if exceeded.
+    fn enforce_value_caps(env: &Env, amount: i128) -> Result<(), PerihelionError> {
+        let storage = env.storage().instance();
+
+        // Check 1: Per-intent maximum
+        if let Some(max_amount) = storage.get::<DataKey, i128>(&DataKey::MaxIntentAmount) {
+            if max_amount > 0 && amount > max_amount {
+                return Err(PerihelionError::ExceedsMaxIntentAmount);
+            }
+        }
+
+        // Check 2: Rolling-window cap (disabled if duration is zero)
+        if let Some(duration) = storage.get::<DataKey, u64>(&DataKey::RollingWindowDuration) {
+            if duration > 0 {
+                if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
+                    if cap > 0 {
+                        // Reject if cap has already been triggered.
+                        if let Some(true) = storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered) {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
+                        // Calculate current window start. Each window spans [windowStart, windowStart + duration).
+                        let now = env.ledger().timestamp();
+                        let window_start = (now / duration) * duration;
+
+                        // Advance memoized window if time has moved to a new bucket.
+                        let latest_window_start = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart).unwrap_or(0);
+                        if window_start > latest_window_start {
+                            storage.set(&DataKey::LatestWindowStart, &window_start);
+                            // In a new window; prior bucket is abandoned. Restart accumulator.
+                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
+                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
+                            }
+                        }
+
+                        // Accumulate this intent's amount into the current window.
+                        let accumulated = storage
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .unwrap_or(0)
+                            .checked_add(amount)
+                            .ok_or(PerihelionError::ArithmeticError)?;
+
+                        if accumulated > cap {
+                            // Cap exceeded: trigger halt and record the window for diagnostics.
+                            storage.set(&DataKey::RollingWindowTriggered, &true);
+                            storage.set(
+                                &DataKey::RollingWindowResetEarliestAt,
+                                &now.checked_add(duration).ok_or(PerihelionError::ArithmeticError)?,
+                            );
+                            env.events().publish(
+                                (Symbol::new(env, "rolling_window_cap_triggered"),),
+                                (window_start, accumulated),
+                            );
+                            return Err(PerihelionError::RollingWindowCapExceeded);
+                        }
+
+                        // Update the bucket.
+                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_fill_instruction(env: &Env, transport_src_eid: u32, fi: FillInstruction) -> Result<(), PerihelionError> {
         // The intent's return-path eid must equal the transport-authenticated
         // origin eid. If they differ, a compromised or misconfigured adapter
@@ -897,6 +1034,9 @@ impl Perihelion {
         {
             return Err(PerihelionError::UntrustedPeer);
         }
+
+        // Check value caps before registering the intent.
+        Self::enforce_value_caps(&env, fi.min_dest_amount)?;
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),
