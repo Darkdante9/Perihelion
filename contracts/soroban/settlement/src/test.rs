@@ -151,7 +151,12 @@ fn setup() -> Setup {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    client.set_peer(&src_eid, &peer);
+    // Peer governance (issue #165): propose, advance time, confirm
+    client.propose_peer(&src_eid, &peer);
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
+    });
+    client.confirm_peer(&src_eid);
 
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);
@@ -607,12 +612,62 @@ fn set_endpoint_emits_event() {
 }
 
 #[test]
-fn set_peer_emits_event() {
+fn peer_governance_propose_emits_event() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.set_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer);
     let events = s.env.events().all();
-    assert!(!events.is_empty(), "expected events after set_peer");
+    assert!(!events.is_empty(), "expected peer_change_proposed event");
+}
+
+#[test]
+fn peer_governance_confirm_requires_delay() {
+    let s = setup();
+    let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    s.client.propose_peer(&s.src_eid, &new_peer);
+
+    // Should fail if called before the delay
+    assert!(s.client.confirm_peer(&s.src_eid).is_err());
+
+    // Advance time and try again
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.confirm_peer(&s.src_eid).is_ok());
+}
+
+#[test]
+fn peer_governance_cancel_clears_pending() {
+    let s = setup();
+    let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    s.client.propose_peer(&s.src_eid, &new_peer);
+
+    // Cancel the pending peer change
+    assert!(s.client.cancel_pending_peer(&s.src_eid).is_ok());
+
+    // Confirm should now fail (no pending change)
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.confirm_peer(&s.src_eid).is_err());
+}
+
+#[test]
+fn peer_governance_get_pending_peer() {
+    let s = setup();
+    let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+
+    // No pending peer initially
+    let pending = s.client.get_pending_peer(&s.src_eid);
+    assert!(pending.is_ok());
+    assert!(pending.unwrap().is_none());
+
+    // After propose, should return the pending peer
+    s.client.propose_peer(&s.src_eid, &new_peer);
+    let pending = s.client.get_pending_peer(&s.src_eid);
+    assert!(pending.is_ok());
+    let (peer, _time) = pending.unwrap().unwrap();
+    assert_eq!(peer, new_peer);
 }
 
 #[test]
@@ -774,12 +829,23 @@ fn endpoint_set_event_shape() {
 }
 
 /// Assert `peer_set` event: topics = ("peer_set",), data = (eid, old, peer)
+/// Verifies the event is emitted only after the delay expires and confirm_peer is called.
 #[test]
 fn peer_set_event_shape() {
     let s = setup();
     // setup() already set a peer; replacing it should emit the event with old value
     let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.set_peer(&s.src_eid, &new_peer);
+
+    // Propose the new peer
+    s.client.propose_peer(&s.src_eid, &new_peer);
+
+    // Advance time past the minimum delay
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+
+    // Confirm the peer change (should emit peer_set event)
+    s.client.confirm_peer(&s.src_eid);
 
     let events = s.env.events().all();
     // Event: ("peer_set",) -> (eid, old, peer) with 3 data fields

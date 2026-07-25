@@ -27,6 +27,12 @@ pub enum DataKey {
     Paused,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
     Peer(u32),
+    /// Pending peer change proposed by admin, awaiting approval after delay.
+    /// Stores (eid, proposed_peer, proposed_at_timestamp). Issue #165.
+    PendingPeer(u32),
+    /// Timestamp when the current pending peer change was proposed.
+    /// Used to enforce the minimum peer-change delay. Issue #165.
+    PendingPeerTime(u32),
     /// Per-corridor pause flag. When set for an eid, all inbound and outbound
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
