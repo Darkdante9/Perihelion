@@ -138,12 +138,18 @@ the package owner. This is enforced automatically via `.github/CODEOWNERS` and
 branch protection. See [CONTRIBUTING.md](./CONTRIBUTING.md#security-review-policy)
 for the full list of sensitive paths and the rationale for each.
 
-## Additional Resources
+## Key Management & Operational Security
 
-- **Architecture & Threat Model:** [TECHNICAL-ARCHITECTURE.md](./docs/TECHNICAL-ARCHITECTURE.md#6-security-model--threat-matrix)
-- **Monitoring & Alerting:** [MONITORING.md](./docs/MONITORING.md)
-- **Contributing Guidelines:** [CONTRIBUTING.md](./CONTRIBUTING.md)
-- **Incident Response:** For critical incidents affecting mainnet, use the GitHub
-  Security Advisory channel and mark as urgent.
+Perihelion's production deployment requires careful management of privileged keys
+(governance multisig, guardian, relayer, solver) and operational procedures
+(incident response, key rotation, monitoring).
+
+See [docs/key-management.md](./docs/key-management.md) for the comprehensive
+key-management and rotation policy, including:
+- Generation, storage, and access control for each key role
+- Operational use procedures and monitoring
+- Planned and emergency rotation playbooks
+- Compromise-response procedures and time budgets
+- Incident response and rotation drills
 
 Thank you for helping keep Perihelion and its users safe.

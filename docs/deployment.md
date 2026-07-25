@@ -30,6 +30,9 @@ unpause, or change configuration.
 > See the [consolidated threat model](./threat-model.md#0-consolidated-trust-model)
 > for a role-by-role trust breakdown including the relayer, DVN set, Stellar
 > validators, and executor.
+>
+> For key generation, storage, rotation, and compromise-response procedures, see
+> [key-management.md](./key-management.md).
 
 ---
 
