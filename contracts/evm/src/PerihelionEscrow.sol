@@ -182,10 +182,33 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         set by {decayGuardianPause} to rate-limit post-TTL re-pausing.
     uint256 public guardianPauseCooldownUntil;
 
+    // --- Value caps (issue #145) -----------------------------------------------
+
+    /// @notice Maximum amount a single intent can lock. Zero means unlimited.
+    ///         Enforced at lock time. Timelock-governed.
+    uint256 public maxIntentAmount;
+    /// @notice Time window (in seconds) for rolling throughput cap. Zero means disabled.
+    uint256 public rollingWindowDuration;
+    /// @notice Maximum total value that can be locked within rollingWindowDuration.
+    ///         Zero means unlimited. Timelock-governed.
+    uint256 public rollingWindowCap;
+    /// @notice Whether the rolling-window cap has been triggered (exceeded).
+    ///         When true, new locks are paused until the admin resets this flag.
+    bool public rollingWindowTriggered;
+    /// @notice Earliest timestamp at which rollingWindowTriggered may be reset.
+    ///         Prevents spam-resetting the cap within the same window.
+    uint256 public rollingWindowResetEarliestAt;
+
     // --- State ---------------------------------------------------------------
 
     /// @notice intentHash => escrow position.
     mapping(bytes32 => Lock) public locks;
+    /// @notice Rolling-window bucket tracking: window start timestamp => cumulative locked amount.
+    ///         Each lock bumps the current window bucket. Windows slide; old buckets are orphaned.
+    mapping(uint256 => uint256) private _rollingWindowBuckets;
+    /// @notice Latest window start timestamp (memoized for efficiency).
+    uint256 private _latestWindowStart;
+
     /// @notice Lazy-nonce high-water mark per source endpoint id.
     ///
     /// This is the **LayerZero transport nonce** — it prevents the same
@@ -253,6 +276,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferCancelled(address indexed previousOwner);
     event Skimmed(address indexed token, address indexed to, uint256 amount);
+    event MaxIntentAmountSet(uint256 maxAmount);
+    event RollingWindowCapSet(uint256 duration, uint256 cap);
+    event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
+    event RollingWindowCapReset();
 
     // --- Errors --------------------------------------------------------------
 
@@ -289,6 +316,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     error GuardianCooldown();
     error PauseNotGuardianInitiated();
     error PauseNotExpired();
+    error ExceedsMaxIntentAmount();
+    error RollingWindowCapExceeded();
+    error RollingWindowCapTriggered();
+    error RollingWindowNotYetResettable();
 
     // --- Modifiers -----------------------------------------------------------
 
@@ -404,6 +435,42 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         emit PausedSet(false);
     }
 
+    // --- Value caps (issue #145) -----------------------------------------------
+
+    /// @notice Set the maximum amount a single intent can lock. Owner-only.
+    ///         Zero means unlimited. Starts conservative; raised as confidence grows.
+    /// @param maxAmount Maximum lock amount (in token's native units), or 0 for unlimited.
+    function setMaxIntentAmount(uint256 maxAmount) external onlyOwner {
+        maxIntentAmount = maxAmount;
+        emit MaxIntentAmountSet(maxAmount);
+    }
+
+    /// @notice Set the rolling-window aggregate throughput cap. Owner-only.
+    ///         When exceeded, new locks are paused until the admin manually resets.
+    ///         Existing in-flight settlement still completes (caps gate only new locks).
+    /// @param _windowDuration Duration of each rolling window in seconds (e.g., 1 day).
+    ///                        Zero disables the rolling-window cap.
+    /// @param _cap Maximum aggregate locked amount within each window (in token's native units).
+    ///             Zero means unlimited. Ignored if windowDuration is zero.
+    function setRollingWindowCap(uint256 _windowDuration, uint256 _cap) external onlyOwner {
+        rollingWindowDuration = _windowDuration;
+        rollingWindowCap = _cap;
+        emit RollingWindowCapSet(_windowDuration, _cap);
+    }
+
+    /// @notice Admin-only: reset the rolling-window cap trigger if it has been
+    ///         exceeded. Can only be called after rollingWindowResetEarliestAt passes
+    ///         to prevent spam. Increases the window start to the current time so a
+    ///         fresh window tracking begins.
+    function resetRollingWindowCap() external onlyOwner {
+        if (block.timestamp < rollingWindowResetEarliestAt) {
+            revert RollingWindowNotYetResettable();
+        }
+        rollingWindowTriggered = false;
+        _latestWindowStart = 0; // reset memoized window, forces recalc on next lock
+        emit RollingWindowCapReset();
+    }
+
     /// @notice Begin a two-step ownership handover. `newOwner` must call
     ///         {acceptOwnership} to take effect. To cancel a pending handover
     ///         with a clear event, use {cancelOwnershipTransfer} instead of
@@ -485,6 +552,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
 
+        // Check value caps before committing to the lock.
+        _enforceValueCaps(intent.sourceAmount);
+
         // Measured-delta accounting: store exactly what the escrow received, so
         // fee-on-transfer / rebasing tokens can never release more than is held.
         uint256 balBefore = IERC20(intent.sourceAsset).balanceOf(address(this));
@@ -522,6 +592,48 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         uint256 quoted = endpoint.quote(params, msg.sender).nativeFee;
         if (msg.value < quoted) revert FeeTooLow();
         endpoint.send{ value: msg.value }(params, msg.sender);
+    }
+
+    // --- Value cap enforcement -----------------------------------------------
+
+    /// @dev Check per-intent and rolling-window value caps. Reverts if exceeded.
+    ///      Must be called before the lock is recorded.
+    function _enforceValueCaps(uint256 sourceAmount) private {
+        // Check 1: Per-intent maximum
+        if (maxIntentAmount > 0 && sourceAmount > maxIntentAmount) {
+            revert ExceedsMaxIntentAmount();
+        }
+
+        // Check 2: Rolling-window cap (disabled if duration is zero)
+        if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
+            // Reject if cap has already been triggered.
+            if (rollingWindowTriggered) {
+                revert RollingWindowCapTriggered();
+            }
+
+            // Calculate current window start. Each window spans [windowStart, windowStart + duration).
+            uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
+
+            // Advance memoized window if time has moved to a new bucket.
+            if (windowStart > _latestWindowStart) {
+                _latestWindowStart = windowStart;
+                // In a new window; prior bucket is abandoned (orphaned). Restart accumulator.
+                delete _rollingWindowBuckets[windowStart - rollingWindowDuration];
+            }
+
+            // Accumulate this lock's amount into the current window.
+            uint256 accumulated = _rollingWindowBuckets[windowStart] + sourceAmount;
+            if (accumulated > rollingWindowCap) {
+                // Cap exceeded: trigger halt and record the window + amount for diagnostics.
+                rollingWindowTriggered = true;
+                rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
+                emit RollingWindowCapTriggered(windowStart, accumulated);
+                revert RollingWindowCapExceeded();
+            }
+
+            // Update the bucket.
+            _rollingWindowBuckets[windowStart] = accumulated;
+        }
     }
 
     // --- LayerZero inbound ---------------------------------------------------

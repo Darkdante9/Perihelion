@@ -32,6 +32,24 @@ pub enum DataKey {
     /// Allows quarantining a single compromised chain without halting others.
     PausedEid(u32),
 
+    // Instance tier (value caps, issue #145).
+    /// Maximum amount a single intent can register (0 = unlimited).
+    MaxIntentAmount,
+    /// Rolling window duration in seconds (0 = disabled).
+    RollingWindowDuration,
+    /// Maximum aggregate settled amount within rolling window (0 = unlimited).
+    RollingWindowCap,
+    /// Whether rolling-window cap has been triggered.
+    RollingWindowTriggered,
+    /// Earliest timestamp to allow resetting the rolling-window cap.
+    RollingWindowResetEarliestAt,
+
+    // Persistent tier (rolling-window tracking, issue #145).
+    /// Rolling-window bucket: window start timestamp => cumulative settled amount.
+    RollingWindowBucket(u64),
+    /// Latest memoized window start timestamp (for efficiency).
+    LatestWindowStart,
+
     // Persistent tier (per-intent lifecycle).
     Intent(BytesN<32>),
     /// Terminal idempotency marker: set iff the intent was settled.
