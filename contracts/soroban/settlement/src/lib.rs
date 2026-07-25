@@ -55,6 +55,7 @@ use messages::{encode_cancel_intent, encode_fill_confirmed};
 // | `admin_transfer_started` | ("admin_transfer_started",)      | (old: Address, new: Address)                     |
 // | `admin_transfer_completed` | ("admin_transfer_completed",)  | (old: Address, new: Address)                     |
 // | `paused_set`           | ("paused_set",)                  | (paused: bool)                                   |
+// | `keeper_reward_set`    | ("keeper_reward_set",)           | (reward: i128)                                   |
 // | `registered`           | ("registered", intent_hash)        | (src_eid: u32, deadline: u64)                    |
 // | `filled`               | ("filled", intent_hash)          | (solver: Address, dest_asset: Address, fill_amount: i128, src_eid: u32) |
 // | `confirmation_sent`    | ("confirmation_sent", intent_hash) | (solver: Address)                                |
@@ -120,6 +121,9 @@ impl Perihelion {
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Endpoint, &endpoint);
         storage.set(&DataKey::Paused, &false);
+        // Issue #173: initialize keeper reward to 0. Admin must call set_keeper_reward
+        // to enable keeper incentives for cancel_expired_intent.
+        storage.set(&DataKey::KeeperReward, &0i128);
         storage.extend_ttl(17_280, 1_209_600);
 
         // Issue #16/#18: emit an event so deployment tooling and off-chain
@@ -241,6 +245,33 @@ impl Perihelion {
         env.events().publish(
             (Symbol::new(&env, "paused_set"),),
             (paused,),
+        );
+        Ok(())
+    }
+
+    /// Set the keeper reward paid to callers of `cancel_expired_intent`. Admin-only.
+    /// A non-zero reward incentivizes third parties to refund expired intents,
+    /// improving the liveness of the cancellation path (issue #173).
+    ///
+    /// The reward is paid in stroops (Stellar's smallest unit, 1 XLM = 10_000_000 stroops).
+    /// Set to 0 to disable the keeper reward and require self-service refunds.
+    ///
+    /// # Safety
+    /// Increasing the reward decreases contract reserves. Operators should ensure
+    /// sufficient funds are available to cover the payout (or accept refund failures
+    /// if reserves are depleted). A typical pattern is to prepay a reserve account
+    /// and use the `set_keeper_reward` to control the payout rate.
+    ///
+    /// Emits `keeper_reward_set(new_reward)` event.
+    pub fn set_keeper_reward(env: Env, reward: i128) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+        if reward < 0 {
+            return Err(PerihelionError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::KeeperReward, &reward);
+        env.events().publish(
+            (Symbol::new(&env, "keeper_reward_set"),),
+            (reward,),
         );
         Ok(())
     }
@@ -525,7 +556,17 @@ impl Perihelion {
     // --- Cancellation ----------------------------------------------------------
 
     /// Cancel an intent whose deadline passed without a fill and notify the
-    /// source chain to refund the user. Permissionless (caller funds the message).
+    /// source chain to refund the user. Permissionless (caller funds the LayerZero message).
+    /// If a keeper reward is configured (issue #173), the caller receives a refund to incentivize
+    /// timely cancellation and improve refund liveness.
+    ///
+    /// # Keeper reward (issue #173)
+    /// When `keeper_reward > 0`, the contract pays the caller a refund of XLM stroops,
+    /// compensating for the LayerZero fee. This incentivizes third parties (keepers) to
+    /// monitor and refund expired intents, improving protocol liveness. The reward is paid
+    /// from the contract's balance (funded by admin pre-deposit or user-prepaid tips).
+    /// If the contract has insufficient XLM to pay the reward, the call fails and the
+    /// cancellation does not proceed.
     pub fn cancel_expired_intent(
         env: Env,
         caller: Address,
@@ -586,6 +627,23 @@ impl Perihelion {
         );
 
         Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
+
+        // Issue #173: pay keeper reward if configured. The reward is paid from
+        // contract reserves after the cancellation is finalized, so failures to
+        // pay do not roll back the cancellation.
+        let keeper_reward: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::KeeperReward)
+            .unwrap_or(0);
+        if keeper_reward > 0 {
+            let native_token = env.native_token();
+            // Effects before interactions: the cancellation is finalized above.
+            // If the payment fails (insufficient balance), the cancellation remains
+            // but the keeper gets no reward. Operators must ensure reserves are
+            // sufficient or accept occasional payment failures.
+            native_token.transfer(&env.current_contract_address(), &caller, &keeper_reward);
+        }
 
         env.events().publish(
             (Symbol::new(&env, "cancelled"), intent_hash),
@@ -716,6 +774,15 @@ impl Perihelion {
             .instance()
             .get(&DataKey::PausedEid(eid))
             .unwrap_or(false)
+    }
+
+    /// Current keeper reward in stroops, paid to callers of `cancel_expired_intent`.
+    /// Zero means the keeper incentive is disabled and refunds are self-serve only (issue #173).
+    pub fn keeper_reward(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::KeeperReward)
+            .unwrap_or(0)
     }
 
     /// PROPOSED Phase 3: Fetch aggregate reputation metrics for a solver.

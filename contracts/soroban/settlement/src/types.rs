@@ -31,6 +31,9 @@ pub enum DataKey {
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
     PausedEid(u32),
+    /// Keeper reward in stroops (Stellar's smallest unit) paid to callers of
+    /// `cancel_expired_intent`. Incentivizes timely refund processing (issue #173).
+    KeeperReward,
 
     // Persistent tier (per-intent lifecycle).
     Intent(BytesN<32>),
