@@ -27,6 +27,10 @@ pub enum PerihelionError {
     NotPendingAdmin = 133,
     /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).
     AdminEndpointCollision = 134,
+    /// No pending peer change exists for the given eid (confirm_peer guard, issue #165).
+    NotPendingPeerChange = 135,
+    /// Minimum peer-change delay has not yet elapsed (confirm_peer guard, issue #165).
+    PeerChangeNotReady = 136,
 
     // --- Intent preconditions ---
     /// No registered intent for the given hash.
