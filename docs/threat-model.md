@@ -477,3 +477,199 @@ constraint:
 - **Runbook:** Add peer-rotation synchronization guidance to deployment.md (Phase 2)
 - **Drill:** Quarterly rotation drill (key-management.md §9) includes a simulated
   front-running scenario to test response time
+
+---
+
+## T16 — LayerZero endpoint compromise & malicious origin spoofing
+
+### Threat
+
+**Vector:** The LayerZero endpoint is the **root of trust for message authenticity**
+on both chains. It is the sole caller of `lzReceive` (EVM) and `lz_receive` (Soroban),
+and it authenticates the message origin:
+
+```solidity
+// EVM: PerihelionEscrow.sol
+require(msg.sender == address(endpoint), "EndpointOnly");
+require(origin.sender == stellarPeer, "PeerOnly");
+```
+
+```rust
+// Soroban: settlement.rs
+require!(msg.sender == endpoint, Unauthorized);
+require!(origin.sender == peer, Unauthorized);
+```
+
+If the endpoint is compromised (or exploited by a critical bug), it could:
+1. Deliver a forged `origin` (claiming a FillConfirmed is from the trusted peer when it is not)
+2. Deliver a message with a spoofed `origin.sender` field
+3. Replay an old message with a new nonce
+4. Deliver multiple copies of the same message
+
+Any of these could bypass the `stellarPeer` / `peer` check and enable an arbitrary
+release of escrow funds or refund of Soroban intents.
+
+**Worst-case impact (endpoint fully compromised):**
+- An attacker forges a FillConfirmed for any intent, releasing the escrow funds to
+  the attacker-controlled Stellar account
+- An attacker forges a CancelIntent for any intent, refunding the user but cashing
+  out the solver's collateral
+- Full drain of the bridge escrow, limited only by the solvers' outstanding fills
+
+**Scope of exposure:** The endpoint compromise is the **most severe threat** to the
+bridge because it bypasses all on-chain verification. The escrow and settlement
+contracts can do nothing to detect a forged message if the endpoint lies about its
+source.
+
+### Architectural root-of-trust assumption
+
+**Explicit assumption:** Perihelion places absolute trust in the LayerZero endpoint
+to:
+1. Enforce its configured DVN/ULN set (at least threshold DVNs must attest)
+2. Return the true `origin.sender` (the contract that sent the message on the
+   source chain)
+3. Reject replays via the transport nonce
+4. Never deliver a message twice with the same nonce
+
+**Why this assumption is necessary:**
+- There is no secondary verification layer in Phase 1 (see roadmap below)
+- Cryptographic verification of the message itself (e.g., a signature on the
+  payload) would require the endpoint to also return the signature, which it does
+  not currently do
+- Trusting the endpoint is the standard bridge architecture; other bridges
+  (Wormhole, Axelar, Hyperlane) make equivalent assumptions about their message
+  layers
+
+**Trust surface:** The endpoint is a smart contract controlled by LayerZero
+governance. Its bytecode and configuration (DVN set, ULN) are publicly verifiable
+on-chain, but the team must trust:
+- LayerZero's governance process
+- LayerZero's security practices and incident response
+- The DVN set's individual security (each DVN runs an oracle/validator network)
+
+### Defense-in-depth controls
+
+**1. Value caps & circuit breaker**
+
+Limit the loss if the endpoint is compromised:
+
+- **Per-operation cap:** No single FillConfirmed can release more than a
+  configurable cap (e.g., $10M USD equivalent); larger intents are split across
+  multiple operations or require special approval
+- **Daily cap:** Total releases per day are capped; once exceeded, all releases
+  pause until reset
+- **Trigger:** If the cap is hit, the guardian can pause to halt further damage
+  while an incident is investigated
+
+**Status:** Under evaluation for Phase 2. Phase 1 has no built-in cap; the
+bridge's safety relies on monitoring (below).
+
+**2. Monitoring & early detection**
+
+Detect a compromise via anomalous release patterns:
+
+- **Watch for:** Releases that do not correspond to known intents (on-chain
+  history of `lock()` events)
+- **Alert on:** Releases with mismatched destination or amount (bridge monitor
+  compares on-chain `FillConfirmed` events against the Soroban ledger state)
+- **Escalate:** If a release does not match any known intent, pause immediately
+  and investigate
+
+**Status:** This is an operational responsibility. The relayer and bridge
+monitoring systems should log every message and alert on mismatches.
+
+**3. Independent verification (Phase 2+)**
+
+Add a secondary trust path that does not depend on the endpoint:
+
+- **Option A: ZK proof of message delivery**
+  - Soroban sends a cryptographic proof of the fill (e.g., a Stellar ledger-entry
+    proof) to EVM
+  - EVM verifies the proof without trusting the endpoint
+  - Solves the problem but requires significant infrastructure
+  - Planned for Phase 2 roadmap
+
+- **Option B: Threshold signature from multiple endpoints**
+  - Use more than one message layer (e.g., LayerZero + Wormhole)
+  - Require agreement from both before releasing
+  - Adds operational overhead and latency
+  - Acceptable for Phase 2 if needed
+
+- **Option C: Delayed release with escrow hold**
+  - On receipt of FillConfirmed, do not release immediately
+  - Hold for a delay window (e.g., 12 hours) while monitoring systems verify
+  - Release only if no contradictory information appears
+  - Trades off latency for additional verification time
+
+**Status:** All options are deferred to Phase 2. Phase 1 operates with endpoint
+as the sole verifier.
+
+**4. Permissionless refund fallback**
+
+Even if the endpoint is compromised and funds are incorrectly released:
+
+- **Deadline expiry:** If the user's intent deadline passes without a valid
+  FillConfirmed being received on Soroban, the user can always call
+  `cancel_expired_intent()` to refund their collateral
+- **Permissionless:** Anyone can call this; a compromised endpoint cannot
+  prevent refunds
+- **Mechanism:** Protects against loss only if the release on EVM was forged
+  and the user's Soroban intent is not actually filled; does NOT protect if
+  the attacker forges both a FillConfirmed on EVM and a matching fill on
+  Soroban
+
+**Status:** Already implemented.
+
+### Trade-offs & design decisions
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Phase 1: Endpoint as sole verifier | **Yes** | Standard bridge architecture; Phase 1 launch unblocked |
+| Phase 1: Additional on-chain verification | No | Would require endpoint to return cryptographic proof; increases payload and latency |
+| Phase 1: Value cap | No / Phase 2 | Adds config complexity; deferred until monitoring suggests it is needed |
+| Phase 2: ZK proof layer | Planned | Removes endpoint trust assumption; requires ZK infrastructure |
+| Phase 2: Multiple message layers | Planned | Threshold-signature verification of endpoint messages |
+| Phase 2: Delayed-release escrow | Planned | Trades latency for verification time if single-endpoint security is insufficient |
+
+### Residual risk
+
+**CRITICAL.** Endpoint compromise is the most severe risk to Perihelion:
+
+- **Impact:** Full bridge drain (no fund loss limit)
+- **Likelihood:** Low (LayerZero is battle-tested, DVN set is reputable) but non-zero
+- **Mitigation in Phase 1:** Monitoring + permissionless refund (partial protection)
+- **Mitigation in Phase 2:** ZK proofs or multi-endpoint verification (removes assumption)
+
+**Specific steps for Phase 1 production readiness:**
+
+1. **Monitoring deployment:**
+   - Bridge monitor observes all `FillConfirmed` events and cross-checks against
+     on-chain intent history
+   - Alert within 30 seconds of any anomalous release
+   - Automate guardian pause on alert (or alert on-call for manual action)
+
+2. **DVN set selection:**
+   - Choose well-established DVNs (Chainlink Labs, Nethermind, Certora, or similar)
+   - Ensure > 1 DVN; require ≥2 signatures (redundancy)
+   - Audit DVN configurations for correctness (block confirmation counts, attestation logic)
+
+3. **Incident response:**
+   - Have a plan to pause, investigate, and (if needed) rotate the endpoint to a
+     LayerZero governance-controlled new endpoint
+   - Timelock delay may prevent fast rotation; pre-arrange with LayerZero for an
+     emergency endpoint update if their Layer is hacked
+
+4. **Operational awareness:**
+   - Team should be aware that endpoint compromise is the sole catastrophic trust
+     assumption
+   - Reduce other risks to zero (DVN integrity, peer validation, guardian key rotation)
+     so that endpoint is the only non-zero risk
+
+### Implementation notes
+
+- **No code changes (Phase 1):** The endpoint check is already in place
+  (`msg.sender == address(endpoint)`)
+- **Documentation (this section):** Explicitly states the assumption and worst-case impact
+- **Monitoring (operational):** Bridge monitoring system (relayer + backend) should
+  implement anomaly detection
+- **Phase 2 roadmap:** ZK proofs or multi-endpoint verification to remove the assumption
