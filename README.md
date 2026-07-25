@@ -340,6 +340,23 @@ settlement contract and the intent specification.
 We build in public and welcome contributors at every stage — from architecture
 discussions to the first lines of contract code.
 
+## Implementation Status
+
+The following components are currently **mocked, stubbed, or pending** and should
+not be assumed to have live, production-ready implementations:
+
+| Component | Status | Details |
+| --- | --- | --- |
+| **LayerZero Endpoint (Soroban)** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines the `LzEndpoint` trait as a minimal, swappable abstraction. During this phase, a mock contract implements this surface; the real endpoint (or a thin adapter) will implement the same signature once the Soroban LayerZero stack is GA. The Soroban side does not yet communicate with a live LayerZero endpoint. |
+| **Inbound FillInstruction Codec** | Pending | The codec for deserializing `FillInstruction` messages from LayerZero is a typed stub. Full implementation is deferred pending finalization of the cross-chain message format (see [issue #2](https://github.com/Perihelion-Protocol/Perihelion/issues/2)). |
+| **Relayer Watcher & Delivery** | Stubs | The `relayer/` module's message watcher and delivery components are currently stubbed out for local testing. Production relayer implementations are still in development. |
+| **Solver Executor** | Unimplemented | The solver executor (`solver/`) is not yet implemented. See [issue #5](https://github.com/Perihelion-Protocol/Perihelion/issues/5). |
+| **Value Caps / Circuit Breaker** | Pending | Protocol-wide value caps and circuit-breaker controls are under development (see [issue #145](https://github.com/Perihelion-Protocol/Perihelion/issues/145)). Currently there are no per-intent maximum locks or rolling-window throughput limits. |
+
+This section is maintained as features land. For an exhaustive implementation
+roadmap, see the [phased rollout](./docs/TECHNICAL-ARCHITECTURE.md#8-phased-rollout)
+section of the Technical Architecture.
+
 ## Contributing
 
 Contributions are welcome at every level. The project is structured around
