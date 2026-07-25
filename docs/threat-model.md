@@ -207,3 +207,106 @@ lock/unlock is a warm `SSTORE_RESET` (2,900 gas) rather than a cold
 **None.** The functional behaviour is unchanged; reentrancy still reverts
 with `Reentrancy()`. The slot invariant (never 0 post-construction) is
 verified in the test suite.
+
+---
+
+## T14 — User under-delivery via low `minDestAmount` floor
+
+### Threat
+
+**Vector:** A user signs an intent with a `minDestAmount` that is economically
+unsound (e.g., set by a buggy SDK, front-end, or malicious wallet), and a
+solver legally fills it by delivering exactly `minDestAmount` while taking a
+large spread. The protocol guarantees the user receives ≥ `minDestAmount`, but
+does not prevent the gap between what the user locked (`sourceAmount`) and what
+they receive (`minDestAmount`) from being unreasonably large.
+
+**Example:** User locks 1,000 USDC on Ethereum (aiming for ~1,000 USDC on Stellar)
+but a buggy front-end sets `minDestAmount = 100 USDC` (1% of the locked amount). A
+solver legally fills the intent, delivering 100 USDC and keeping 900 USDC as
+spread. The user has no on-chain recourse — they accepted those terms when they
+signed `minDestAmount = 100`.
+
+**Why it matters:** The protocol's sole on-chain protection against this is
+`minDestAmount`. Off-chain, it is the user's sole responsibility to set an
+economically sane floor. But the responsibility boundary is unclear:
+- A buggy SDK can set a default floor that is too low
+- A malicious or buggy front-end can override the floor with a low value
+- Wallet integrations that construct intents may not validate the floor
+
+The threat model does not currently address this, leaving an implicit
+responsibility-assignment gap.
+
+### Mitigation: Documented invariant + off-chain + optional on-chain bounds
+
+**The value-delivery invariant** (formally documented):
+- The protocol guarantees: `filled_amount ≥ minDestAmount` (always true)
+- The protocol does NOT guarantee: `filled_amount ≈ fair_market_rate(sourceAmount)`
+- Floor-setting is the user's sole responsibility
+- The spread (sourceAmount → minDestAmount gap) is the solver's compensation
+  and is entirely determined by the user's choice of `minDestAmount`
+
+**Off-chain protections** (SDK, front-end, wallet layer):
+1. **SDK validation** (issue #8): Before signing, validate that `minDestAmount`
+   is economically sane:
+   - Estimate a fair market-rate destination amount from the source amount
+     (using an oracle or reference price)
+   - Reject if `minDestAmount < fair_rate * slippage_tolerance` (e.g.,
+     `slippage_tolerance = 0.95` means ≥95% of fair value)
+   - Emit a warning if the spread exceeds a configurable threshold
+   - Document the assumption that the user has access to an accurate price feed
+
+2. **Front-end guidance**: Display the estimated fair value and the chosen
+   `minDestAmount` side-by-side; highlight when the gap is large (e.g., >2%)
+
+3. **Wallet best practices**: Wallets should either use the SDK's validated
+   intent builder or implement equivalent price validation before signing
+
+**On-chain bounds** (optional, requires architecture decisions):
+- A reference-price sanity check (requires an oracle or inclusion of a signed
+  price feed in the intent)
+- Rejected as a hard requirement in Phase 1 because it introduces a new
+  trusted source (the oracle); Phase 2 may add this as an optional parameter
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Hard on-chain floor bound (oracle-based) | No / Phase 2 | Requires a trusted oracle; adds protocol complexity; Phase 2 roadmap includes optional ZK pricing proofs |
+| Soft SDK validation + warnings | **Yes** | Catches the most common case (buggy SDK); places the burden on the party best positioned to validate (off-chain integrators); lowers the barrier to Phase 1 launch |
+| Front-end UX (side-by-side display) | **Yes** | Helps power users spot bad floors; cannot prevent a determined user from accepting them, but makes the choice explicit |
+| Threat-model documentation | **Yes** | Clarifies the responsibility boundary and the protocol's guarantee (≥ floor, not ≈ fair value) so integrators know what they must implement |
+
+### Residual risk
+
+**Medium → Low.** Off-chain integrators (SDKs, front-ends, wallets) bear the
+responsibility to validate floors. This is acceptable given:
+- The SDK will implement automated validation (issue #8)
+- Front-end UX makes the choice explicit
+- The protocol's guarantee is precise and documented
+- Users who choose a low floor despite warnings lose opportunity cost, not
+  principal (all funds are locked and refundable if not claimed)
+
+Residual exposure comes from:
+1. Integrators that skip validation (risk: user under-delivery)
+2. A compromised or malicious front-end that forces a low floor (risk: same,
+   but intentional)
+3. Oracles that become stale or compromised (risk if Phase 2 adds oracle-based
+   bounds, mitigated by treating the oracle as a circuit-breaker with wide
+   tolerance)
+
+**Operational note for teams deploying a front-end:** The front-end should
+always query an oracle or reference price before rendering an intent signature
+prompt. If no price is available, block the user from proceeding. Document this
+as a required integration step.
+
+### Implementation notes
+
+- **SDK** (issue #8): `buildIntent` validates `minDestAmount` against a
+  reference price before returning the intent object
+- **Threat model:** This section documents the invariant and the responsibility
+  boundary
+- **Docs:** `intent-spec.md` already documents `minDestAmount` semantics;
+  reference this section for the threat context
+- **Testing:** SDK tests verify that validation rejects floors below the
+  threshold and accepts fair-value floors
