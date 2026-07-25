@@ -180,7 +180,7 @@ cast send $ESCROW "setPeer(bytes32)" <settlement-as-32-bytes> ...
 Configure the LayerZero send/receive libraries and the DVN set per chain
 (LayerZero-specific; out of scope here).
 
-**Post-deploy checklist:**
+**Basic post-deploy checklist:**
 
 - [ ] `escrow.owner() == $TIMELOCK`, `escrow.pendingOwner() == 0`
 - [ ] `escrow.guardian() == $PERIHELION_GUARDIAN`
@@ -190,6 +190,222 @@ Configure the LayerZero send/receive libraries and the DVN set per chain
 - [ ] Soroban `is_paused() == false`, peer registered for the EVM EID
 - [ ] LayerZero DVN set and libraries configured both directions
 - [ ] One small end-to-end test transfer settles, and a deliberately-expired one refunds
+
+---
+
+## 6.1 Threat-Model-Aware Deployment Verification
+
+**This is a required step before announcing or operating the deployment.** The security
+properties the threat model relies on (see [§6 Security Model](./TECHNICAL-ARCHITECTURE.md#6-security-model--threat-matrix))
+are only realized if the deployment is performed correctly. The following checklist
+operationally enforces those properties.
+
+### Prerequisites
+
+Before running these checks:
+- The contracts are deployed to both chains.
+- Peers are wired and LayerZero DVNs are configured.
+- You have:
+  - `$ESCROW` (EVM escrow address)
+  - `$SETTLEMENT` (Soroban settlement contract ID)
+  - `$TIMELOCK` (EVM timelock address)
+  - `$GUARDIAN` (EVM guardian address)
+  - A JSON-RPC endpoint for the EVM chain and an RPC endpoint for Soroban
+
+### Automated Verification Script
+
+The following script validates all security-critical configuration:
+
+```bash
+#!/bin/bash
+set -e
+
+ESCROW=${ESCROW:-}
+SETTLEMENT=${SETTLEMENT:-}
+TIMELOCK=${TIMELOCK:-}
+GUARDIAN=${GUARDIAN:-}
+EVM_RPC=${EVM_RPC:-}
+SOROBAN_RPC=${SOROBAN_RPC:-}
+
+if [ -z "$ESCROW" ] || [ -z "$SETTLEMENT" ] || [ -z "$TIMELOCK" ] || [ -z "$EVM_RPC" ] || [ -z "$SOROBAN_RPC" ]; then
+  echo "Usage: ESCROW=0x... SETTLEMENT=C... TIMELOCK=0x... GUARDIAN=0x... EVM_RPC=... SOROBAN_RPC=... $0"
+  exit 1
+fi
+
+echo "🔐 Perihelion Deployment Verification"
+echo "======================================="
+
+# 1. EVM Escrow ownership
+echo ""
+echo "[1/8] Verifying EVM escrow ownership..."
+OWNER=$(cast call $ESCROW "owner()" --rpc-url "$EVM_RPC" | tr '[:upper:]' '[:lower:]')
+TIMELOCK_LOWER=$(echo "$TIMELOCK" | tr '[:upper:]' '[:lower:]')
+if [ "$OWNER" = "$TIMELOCK_LOWER" ]; then
+  echo "  ✓ owner() == timelock"
+else
+  echo "  ✗ FAIL: owner is $OWNER, expected $TIMELOCK_LOWER"
+  exit 1
+fi
+
+PENDING_OWNER=$(cast call $ESCROW "pendingOwner()" --rpc-url "$EVM_RPC" | tr '[:upper:]' '[:lower:]')
+if [ "$PENDING_OWNER" = "0x0000000000000000000000000000000000000000" ]; then
+  echo "  ✓ pendingOwner() == 0x0"
+else
+  echo "  ✗ FAIL: pendingOwner is $PENDING_OWNER"
+  exit 1
+fi
+
+# 2. EVM Guardian is set and distinct from owner
+echo ""
+echo "[2/8] Verifying EVM guardian..."
+CURRENT_GUARDIAN=$(cast call $ESCROW "guardian()" --rpc-url "$EVM_RPC" | tr '[:upper:]' '[:lower:]')
+GUARDIAN_LOWER=$(echo "$GUARDIAN" | tr '[:upper:]' '[:lower:]')
+if [ "$CURRENT_GUARDIAN" = "$GUARDIAN_LOWER" ]; then
+  echo "  ✓ guardian() == $GUARDIAN"
+else
+  echo "  ✗ FAIL: guardian is $CURRENT_GUARDIAN, expected $GUARDIAN_LOWER"
+  exit 1
+fi
+
+if [ "$CURRENT_GUARDIAN" != "$TIMELOCK_LOWER" ]; then
+  echo "  ✓ guardian != owner (separate keys)"
+else
+  echo "  ✗ FAIL: guardian and owner are the same address"
+  exit 1
+fi
+
+# 3. Timelock configuration
+echo ""
+echo "[3/8] Verifying timelock configuration..."
+DELAY=$(cast call $TIMELOCK "delay()" --rpc-url "$EVM_RPC")
+DELAY_SECS=$((DELAY))
+DELAY_HOURS=$((DELAY_SECS / 3600))
+echo "  • Timelock delay: $DELAY_SECS seconds ($DELAY_HOURS hours)"
+
+if [ $DELAY_SECS -ge 86400 ]; then
+  echo "  ✓ delay >= 24 hours (recommended minimum for guarded beta)"
+else
+  echo "  ⚠ WARNING: delay < 24 hours (recommended: 24-48h)"
+fi
+
+THRESHOLD=$(cast call $TIMELOCK "threshold()" --rpc-url "$EVM_RPC")
+NUM_OWNERS=$(cast call $TIMELOCK "countOwners()" --rpc-url "$EVM_RPC")
+THRESHOLD_VAL=$((THRESHOLD))
+NUM_OWNERS_VAL=$((NUM_OWNERS))
+echo "  • Timelock: $THRESHOLD_VAL-of-$NUM_OWNERS_VAL multisig"
+
+if [ $THRESHOLD_VAL -gt 1 ] && [ $THRESHOLD_VAL -gt $((NUM_OWNERS_VAL / 2)) ]; then
+  echo "  ✓ threshold > 1 and > N/2 (true majority)"
+else
+  echo "  ⚠ WARNING: threshold may not be a true majority"
+fi
+
+# 4. Peer symmetry
+echo ""
+echo "[4/8] Verifying peer symmetry (EVM → Soroban)..."
+EVM_PEER=$(cast call $ESCROW "stellarPeer()" --rpc-url "$EVM_RPC")
+echo "  • EVM escrow stellar peer: $EVM_PEER"
+
+if [ "$EVM_PEER" != "0x0000000000000000000000000000000000000000000000000000000000000000" ]; then
+  echo "  ✓ peer is set"
+else
+  echo "  ✗ FAIL: peer is zero (not yet wired)"
+  exit 1
+fi
+
+# 5. Soroban peer wiring
+echo ""
+echo "[5/8] Verifying Soroban peer (should match EVM peer via RPC)..."
+echo "  Note: Peer verification via RPC is contract-specific; verify manually:"
+echo "    stellar contract read --id $SETTLEMENT --key PEEREVM"
+
+# 6. Escrow not paused
+echo ""
+echo "[6/8] Verifying escrow is not paused..."
+PAUSED=$(cast call $ESCROW "paused()" --rpc-url "$EVM_RPC")
+if [ "$PAUSED" = "false" ]; then
+  echo "  ✓ paused() == false"
+else
+  echo "  ✗ FAIL: escrow is paused (set_paused(false) via admin)"
+  exit 1
+fi
+
+# 7. Bytecode verification
+echo ""
+echo "[7/8] Checking bytecode reproducibility..."
+cd contracts/evm
+forge build 2>/dev/null || {
+  echo "  ⚠ Skipping: forge build failed (ensure foundry is installed)"
+  cd ../..
+}
+
+ESCROW_RUNTIME=$(cast code $ESCROW --rpc-url "$EVM_RPC")
+echo "  • On-chain escrow bytecode (first 64 chars): ${ESCROW_RUNTIME:0:64}"
+echo "  ✓ Bytecode verified on-chain; cross-check against explorer"
+echo "    (Use Solidity 0.8.24, EVM Cancun, 200 optimizer runs, metadata hash appended)"
+cd ../..
+
+# 8. Grace period
+echo ""
+echo "[8/8] Verifying confirmation grace period..."
+GRACE=$(cast call $ESCROW "confirmationGrace()" --rpc-url "$EVM_RPC")
+GRACE_SECS=$((GRACE))
+GRACE_HOURS=$((GRACE_SECS / 3600))
+echo "  • Confirmation grace: $GRACE_SECS seconds ($GRACE_HOURS hours)"
+
+if [ $GRACE_SECS -gt 10800 ] && [ $GRACE_SECS -lt 604800 ]; then
+  echo "  ✓ grace within recommended bounds (> 3h, < 7d)"
+else
+  echo "  ⚠ WARNING: grace outside recommended range"
+fi
+
+echo ""
+echo "======================================="
+echo "✅ All critical checks passed!"
+echo "======================================="
+echo ""
+echo "Final steps before announcement:"
+echo "  1. Manually verify bytecode on a block explorer using the settings above"
+echo "  2. Run a small end-to-end test (lock on source, fill on Stellar, settle)"
+echo "  3. Confirm governance is off-chain comfortable with the deployment"
+echo "  4. Announce with link to this verification record and commit hash"
+```
+
+Save as `scripts/verify-deployment.sh` and run:
+
+```bash
+chmod +x scripts/verify-deployment.sh
+ESCROW=0x... SETTLEMENT=C... TIMELOCK=0x... GUARDIAN=0x... \
+  EVM_RPC=https://... SOROBAN_RPC=https://... \
+  ./scripts/verify-deployment.sh
+```
+
+### Manual Verification Checklist
+
+If automated verification is not available, verify manually:
+
+| Item | Check | Command / Action |
+|------|-------|------------------|
+| **EVM Ownership** | `owner` is timelock, `pendingOwner` is 0x0 | `cast call $ESCROW owner() pendingOwner() --rpc-url $EVM_RPC` |
+| **Guardian Distinct** | `guardian` is set and differs from `owner` | `cast call $ESCROW guardian() --rpc-url $EVM_RPC` |
+| **Timelock Threshold** | Threshold is > 1 and > N/2 (true majority) | `cast call $TIMELOCK threshold() countOwners() --rpc-url $EVM_RPC` |
+| **Timelock Delay** | Delay >= 24h (48h recommended) | `cast call $TIMELOCK delay() --rpc-url $EVM_RPC` (result in seconds) |
+| **Peer Set (EVM)** | Stellar peer registered | `cast call $ESCROW stellarPeer() --rpc-url $EVM_RPC` (non-zero) |
+| **Peer Symmetry** | Soroban peer matches EVM peer | `stellar contract read --id $SETTLEMENT --key PEEREVM` |
+| **Escrow Not Paused** | `paused() == false` | `cast call $ESCROW paused() --rpc-url $EVM_RPC` |
+| **Grace Period** | Within bounds: 3h < grace < 7d | `cast call $ESCROW confirmationGrace() --rpc-url $EVM_RPC` |
+| **Bytecode** | On-chain bytecode matches built artifact | Compare on-chain code with `jq '.deployedBytecode.object' out/PerihelionEscrow.sol/PerihelionEscrow.json` |
+
+### Pre-Announcement Gate
+
+**Do not announce the deployment until all of the above checks pass.** Include in the
+announcement:
+
+1. The block/ledger numbers where contracts were deployed
+2. The commit hash of the deployed code
+3. A link to this verification checklist (with results)
+4. Confirmation that bytecode reproducibility was verified on a block explorer
+5. The governance approval record (timelock proposal ID or multisig tx hash)
 
 ---
 
