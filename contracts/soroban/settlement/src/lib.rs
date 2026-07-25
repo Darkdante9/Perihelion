@@ -85,6 +85,15 @@ const MIN_SECS_PER_LEDGER: u64 = 4;
 /// covers any realistic cross-chain settlement window.
 pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 
+/// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
+/// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
+/// Matches the EVM's 1-day minimum to give users time to react to peer rotations.
+pub const MIN_PEER_CHANGE_DELAY: u64 = 86_400; // 1 day in seconds
+
+/// Maximum delay for peer changes. Prevents governance from bricking peer
+/// rotation with an unworkably long delay. Mirrors EVM's MAX_DELAY.
+pub const MAX_PEER_CHANGE_DELAY: u64 = 2_592_000; // 30 days in seconds
+
 #[contract]
 pub struct Perihelion;
 
@@ -156,31 +165,117 @@ impl Perihelion {
         Ok(())
     }
 
-    /// Register/replace the trusted remote peer (the EVM escrow) for a source
-    /// endpoint id. Admin-only.
+    /// Propose a new peer (EVM escrow address) for a source endpoint id (issue #165).
+    /// Admin-only. Initiates a delayed peer change; the change becomes effective
+    /// only after the minimum delay has elapsed and the admin calls `confirm_peer`.
     ///
-    /// Emits a `peer_set` event with `(eid, old, new)` (issue #16). Peer
-    /// rotations are critical: a malicious peer change redirects trust for an
-    /// entire endpoint id, allowing spoofed fills and cancellations.
+    /// This brings Soroban peer-management under the same governance/delay model as
+    /// the EVM side (PerihelionTimelock), preventing instant unauthorized peer
+    /// rotation if the admin key is compromised. The delay gives users a window to
+    /// detect and react to a suspicious peer change (e.g., via monitoring alerts).
+    ///
+    /// Emits `peer_change_proposed(eid, old_peer, new_peer, ready_at)` (issue #165).
     ///
     /// # Peer symmetry (issue #15)
     /// The same peer address is used for **both** inbound validation
     /// (`lz_receive` checks `origin.sender == Peer(origin.src_eid)`) and
     /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
     /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
-    /// counterparty for a given endpoint id is symmetric — the same EVM escrow
-    /// address we receive from is the one we send FillConfirmed/CancelIntent to.
-    /// Operators must always call `set_peer` with the deployed escrow's 32-byte
-    /// address for every eid that will appear as `src_eid` in a FillInstruction.
-    pub fn set_peer(env: Env, eid: u32, peer: BytesN<32>) -> Result<(), PerihelionError> {
+    /// counterparty for a given endpoint id is symmetric.
+    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
-        let old: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
-        env.storage().instance().set(&DataKey::Peer(eid), &peer);
+        let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
+        let now = env.ledger().timestamp();
+        let ready_at = now + MIN_PEER_CHANGE_DELAY;
+
+        env.storage().instance().set(&DataKey::PendingPeer(eid), &new_peer);
+        env.storage().instance().set(&DataKey::PendingPeerTime(eid), &now);
         env.events().publish(
-            (Symbol::new(&env, "peer_set"),),
-            (eid, old, peer),
+            (Symbol::new(&env, "peer_change_proposed"),),
+            (eid, old_peer, new_peer, ready_at),
         );
         Ok(())
+    }
+
+    /// Confirm and apply a pending peer change (issue #165). Admin-only.
+    /// Must be called after the minimum delay (`MIN_PEER_CHANGE_DELAY`) has elapsed
+    /// since `propose_peer` was called. Atomically sets the new peer address and
+    /// clears the pending state.
+    ///
+    /// Emits `peer_set(eid, old, new)` when the change is applied (issue #16).
+    ///
+    /// # Errors
+    /// - `NotPendingPeerChange` if no peer change is pending for this eid
+    /// - `PeerChangeNotReady` if the minimum delay has not yet elapsed
+    pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        let proposed_peer: BytesN<32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeer(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerTime(eid))
+            .ok_or(PerihelionError::NotPendingPeerChange)?;
+
+        let now = env.ledger().timestamp();
+        if now < proposed_at + MIN_PEER_CHANGE_DELAY {
+            return Err(PerihelionError::PeerChangeNotReady);
+        }
+
+        let old_peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::Peer(eid));
+        env.storage().instance().set(&DataKey::Peer(eid), &proposed_peer);
+        env.storage().instance().remove(&DataKey::PendingPeer(eid));
+        env.storage().instance().remove(&DataKey::PendingPeerTime(eid));
+
+        env.events().publish(
+            (Symbol::new(&env, "peer_set"),),
+            (eid, old_peer, proposed_peer),
+        );
+        Ok(())
+    }
+
+    /// Cancel a pending peer change (issue #165). Admin-only.
+    /// Clears any pending peer change without applying it, allowing the admin
+    /// to revoke a proposed change before the delay expires.
+    ///
+    /// Emits `peer_change_cancelled(eid)` (issue #165).
+    pub fn cancel_pending_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::require_admin(&env)?.require_auth();
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeer(eid));
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingPeerTime(eid));
+
+        env.events().publish(
+            (Symbol::new(&env, "peer_change_cancelled"),),
+            (eid,),
+        );
+        Ok(())
+    }
+
+    /// Retrieve the currently-active peer address for an endpoint id.
+    pub fn get_peer(env: Env, eid: u32) -> Result<Option<BytesN<32>>, PerihelionError> {
+        Ok(env.storage().instance().get(&DataKey::Peer(eid)))
+    }
+
+    /// Retrieve a pending peer change, if one exists (issue #165).
+    /// Returns (proposed_peer, proposed_at_timestamp) or None if no change pending.
+    pub fn get_pending_peer(env: Env, eid: u32) -> Result<Option<(BytesN<32>, u64)>, PerihelionError> {
+        let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
+        let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
+
+        Ok(match (peer, time) {
+            (Some(p), Some(t)) => Some((p, t)),
+            _ => None,
+        })
     }
 
     /// Begin a two-step admin handover (issue #17).
@@ -908,6 +1003,72 @@ impl Perihelion {
         Ok(())
     }
 
+    /// Check per-intent and rolling-window value caps. Reverts if exceeded.
+    fn enforce_value_caps(env: &Env, amount: i128) -> Result<(), PerihelionError> {
+        let storage = env.storage().instance();
+
+        // Check 1: Per-intent maximum
+        if let Some(max_amount) = storage.get::<DataKey, i128>(&DataKey::MaxIntentAmount) {
+            if max_amount > 0 && amount > max_amount {
+                return Err(PerihelionError::ExceedsMaxIntentAmount);
+            }
+        }
+
+        // Check 2: Rolling-window cap (disabled if duration is zero)
+        if let Some(duration) = storage.get::<DataKey, u64>(&DataKey::RollingWindowDuration) {
+            if duration > 0 {
+                if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
+                    if cap > 0 {
+                        // Reject if cap has already been triggered.
+                        if let Some(true) = storage.get::<DataKey, bool>(&DataKey::RollingWindowTriggered) {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
+                        // Calculate current window start. Each window spans [windowStart, windowStart + duration).
+                        let now = env.ledger().timestamp();
+                        let window_start = (now / duration) * duration;
+
+                        // Advance memoized window if time has moved to a new bucket.
+                        let latest_window_start = storage.get::<DataKey, u64>(&DataKey::LatestWindowStart).unwrap_or(0);
+                        if window_start > latest_window_start {
+                            storage.set(&DataKey::LatestWindowStart, &window_start);
+                            // In a new window; prior bucket is abandoned. Restart accumulator.
+                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
+                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
+                            }
+                        }
+
+                        // Accumulate this intent's amount into the current window.
+                        let accumulated = storage
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .unwrap_or(0)
+                            .checked_add(amount)
+                            .ok_or(PerihelionError::ArithmeticError)?;
+
+                        if accumulated > cap {
+                            // Cap exceeded: trigger halt and record the window for diagnostics.
+                            storage.set(&DataKey::RollingWindowTriggered, &true);
+                            storage.set(
+                                &DataKey::RollingWindowResetEarliestAt,
+                                &now.checked_add(duration).ok_or(PerihelionError::ArithmeticError)?,
+                            );
+                            env.events().publish(
+                                (Symbol::new(env, "rolling_window_cap_triggered"),),
+                                (window_start, accumulated),
+                            );
+                            return Err(PerihelionError::RollingWindowCapExceeded);
+                        }
+
+                        // Update the bucket.
+                        storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_fill_instruction(env: &Env, transport_src_eid: u32, fi: FillInstruction) -> Result<(), PerihelionError> {
         // The intent's return-path eid must equal the transport-authenticated
         // origin eid. If they differ, a compromised or misconfigured adapter
@@ -964,6 +1125,9 @@ impl Perihelion {
         {
             return Err(PerihelionError::UntrustedPeer);
         }
+
+        // Check value caps before registering the intent.
+        Self::enforce_value_caps(&env, fi.min_dest_amount)?;
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),

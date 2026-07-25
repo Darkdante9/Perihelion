@@ -27,6 +27,12 @@ pub enum DataKey {
     Paused,
     /// Trusted remote OApp (the EVM escrow) per source endpoint id.
     Peer(u32),
+    /// Pending peer change proposed by admin, awaiting approval after delay.
+    /// Stores (eid, proposed_peer, proposed_at_timestamp). Issue #165.
+    PendingPeer(u32),
+    /// Timestamp when the current pending peer change was proposed.
+    /// Used to enforce the minimum peer-change delay. Issue #165.
+    PendingPeerTime(u32),
     /// Per-corridor pause flag. When set for an eid, all inbound and outbound
     /// operations for that corridor are blocked independently of the global flag.
     /// Allows quarantining a single compromised chain without halting others.
@@ -34,6 +40,24 @@ pub enum DataKey {
     /// Keeper reward in stroops (Stellar's smallest unit) paid to callers of
     /// `cancel_expired_intent`. Incentivizes timely refund processing (issue #173).
     KeeperReward,
+
+    // Instance tier (value caps, issue #145).
+    /// Maximum amount a single intent can register (0 = unlimited).
+    MaxIntentAmount,
+    /// Rolling window duration in seconds (0 = disabled).
+    RollingWindowDuration,
+    /// Maximum aggregate settled amount within rolling window (0 = unlimited).
+    RollingWindowCap,
+    /// Whether rolling-window cap has been triggered.
+    RollingWindowTriggered,
+    /// Earliest timestamp to allow resetting the rolling-window cap.
+    RollingWindowResetEarliestAt,
+
+    // Persistent tier (rolling-window tracking, issue #145).
+    /// Rolling-window bucket: window start timestamp => cumulative settled amount.
+    RollingWindowBucket(u64),
+    /// Latest memoized window start timestamp (for efficiency).
+    LatestWindowStart,
 
     // Persistent tier (per-intent lifecycle).
     Intent(BytesN<32>),

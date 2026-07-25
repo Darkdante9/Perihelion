@@ -16,6 +16,25 @@
 
 ---
 
+## Current Implementation Status
+
+The following components are currently **interface/mock, stubbed, or pending**. Do
+not assume a fully-realized, production-ready implementation for any of these.
+This status is maintained and linked from the [README](../README.md#implementation-status).
+
+**Note:** Refer to the [Glossary](./glossary.md) for precise definitions of all protocol terms,
+including cross-layer synonyms (e.g., "release" vs. "settle") used throughout this specification.
+
+| Component | Status | Current state | Target |
+|-----------|--------|-----------------|---------|
+| **Soroban LayerZero Endpoint** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines `LzEndpoint` as a swappable abstraction; a mock implements it locally | Real endpoint or thin adapter once Soroban LayerZero stack is GA |
+| **Inbound FillInstruction Codec** | Pending | Typed stub; deserialization deferred | Full implementation after cross-chain message format is finalized (#2) |
+| **Relayer Watcher & Delivery** | Stubs | Message watcher and delivery in `relayer/` are stubbed for local testing | Production relayer implementations in active development |
+| **Solver Executor** | Unimplemented | Not yet implemented in `solver/` | Required for Phase 1 (#5) |
+| **Value Caps & Circuit Breaker** | Pending | No per-intent maxima or rolling-window caps yet | Per-intent and window-based limits, timelock-governed (#145) |
+
+---
+
 ## 0. Design Invariants (read first)
 
 Every component below is built to preserve five global invariants. They are
