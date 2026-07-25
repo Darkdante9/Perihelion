@@ -22,6 +22,9 @@ The following components are currently **interface/mock, stubbed, or pending**. 
 not assume a fully-realized, production-ready implementation for any of these.
 This status is maintained and linked from the [README](../README.md#implementation-status).
 
+**Note:** Refer to the [Glossary](./glossary.md) for precise definitions of all protocol terms,
+including cross-layer synonyms (e.g., "release" vs. "settle") used throughout this specification.
+
 | Component | Status | Current state | Target |
 |-----------|--------|-----------------|---------|
 | **Soroban LayerZero Endpoint** | Interface + Mock | `contracts/soroban/settlement/src/endpoint.rs` defines `LzEndpoint` as a swappable abstraction; a mock implements it locally | Real endpoint or thin adapter once Soroban LayerZero stack is GA |
