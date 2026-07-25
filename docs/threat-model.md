@@ -310,3 +310,170 @@ as a required integration step.
   reference this section for the threat context
 - **Testing:** SDK tests verify that validation rejects floors below the
   threshold and accepts fair-value floors
+
+---
+
+## T15 — Front-running of pause bypass & telegraphed timelock actions
+
+### Threat
+
+**Vector 1: Pause does not stop releases**
+
+The guardian `pause()` halts new `lock()` calls and local `cancelExpired()` refunds,
+but **does not gate `lzReceive`** (LayerZero inbound settlement). This is intentional:
+in-flight FillConfirmed/CancelIntent messages should complete even while the protocol
+is paused, so users' funds are not stranded mid-transfer.
+
+However, an attacker mid-exploit who has a malicious or forged FillConfirmed queued
+in the LayerZero message pool can still drain the escrow via the inbound path even
+after the guardian pauses. The pause stops the *source* side (no new locks), but not
+the *destination* side (releases still happen).
+
+**Timeline of concern:**
+
+```
+T=0:  Attacker detects vulnerability in solver or contract
+T=1:  Attacker crafts a malicious FillConfirmed or forges one (requires DVN compromise)
+T=2:  Attacker queues the message in LayerZero (pending delivery)
+T=3:  Guardian detects the exploit and calls pause()
+      → new locks are blocked
+      → but the queued FillConfirmed still releases funds when lzReceive executes
+T=4:  Attacker calls lzReceive() to trigger delivery and drain the escrow
+      → release succeeds, funds exit the bridge
+```
+
+**Worst case:** If a DVN is compromised or LayerZero is exploited, an attacker can
+forge a FillConfirmed, queue it before any detection, and execute it even after
+pause. The pause window gives the team no ability to stop that specific drain.
+
+**Vector 2: Telegraphed timelock actions**
+
+Every timelocked admin action (peer rotation, grace change, guardian swap, unpause)
+is public the moment it is proposed. The message is on-chain for the delay window
+(typically 48 hours), and an attacker can:
+
+1. **Front-run the action:** Observe the proposal, craft a transaction that exploits
+   the new configuration, and submit it the instant the action executes (same block
+   or next block)
+2. **Front-run the action's impact:** If peer rotation is proposed, an attacker can
+   front-run by executing a malicious fill with the old peer, locking in a bad state
+   before the peer changes
+3. **React to the proposal:** Knowing a guardian rotation is coming, an attacker with
+   a leaked guardian key can exhaust the remaining guardian pause window before being
+   rotated out
+
+**Scope of exposure:** The protocol guarantees that users get ≥`minDestAmount` and
+that funds are refundable if not claimed. These guarantees are not broken by
+front-running. But liveness and efficiency are affected:
+- A paused-while-draining scenario could strand in-flight funds temporarily
+- A rotated-peer front-run could cause failed settlement if the new peer is unknown
+  to the attacker
+- A rotated-guardian front-run exhaust could deny emergency pause capability
+
+### Analysis & Stance
+
+**Pause excludes releases: Design decision rationale**
+
+The protocol intentionally does not gate `lzReceive` by pause because:
+1. **Funds safety:** In-flight transfers must complete; users' funds must never be
+   stranded waiting for the protocol to unpause
+2. **Liveness:** Pausing is meant to halt *new* activity, not destroy *in-progress*
+   activity
+3. **Recovery from non-exploit issues:** If a pause is triggered by, e.g., a relayer
+   DoS or temporary LayerZero issue (not an active drain), unpausing and completing
+   in-flight settlement is the fast path to recovery
+
+**Trade-off accepted:** An exploit that has a queued malicious FillConfirmed could
+drain even while paused. This is a known risk because:
+- The DVN set is a strong trust assumption; a DVN compromise is a worse scenario
+  than any single message drain
+- If the DVN is compromised, no amount of pause logic can stop the drain; the only
+  defense is architecture (peer verification, value caps, secondary checks), not gates
+- The pause is meant to buy time for investigation, not to provide cryptographic
+  protection against a compromised DVN
+
+**Emergency release-halt control: Deferred to Phase 2**
+
+An alternative design would add a separate emergency-control to halt *all* releases
+(including in-flight), accepting that some in-flight transfers would be stranded.
+This control is deferred because:
+- It introduces a second pause state (global pause vs. message-halt pause)
+- It increases operational complexity (when to use which pause?)
+- The current pause + DDL circuit breaker (if implemented) provides adequate
+  protection: a single drain is capped, and the pause buys time
+
+This will be reconsidered in Phase 2 if incident data suggests a need.
+
+**Telegraphed timelock actions: Accepted architectural constraint**
+
+Timelock delay is intentionally public:
+1. **Governance principle:** Users (and external auditors) can see every admin
+   action and object before it takes effect; no surprises
+2. **Dispute window:** If a proposal is contentious, the window is wide enough for
+   governance coordination
+3. **On-chain transparency:** Public proposals are part of the design, not a flaw
+
+**Mitigation against front-running of specific actions:**
+
+| Action | Front-run vector | Mitigation |
+|--------|-----------------|-----------|
+| **Peer rotation** | Attacker uses old peer to fill before new peer takes effect | Peer change is backward-compatible (escrow accepts fills from both old and new peer during a grace window if implemented) |
+| **Grace period change** | Attacker changes timing constraints during delay window | Grace period is monotonic (only increases or decreases by small amounts); window is public so governance can adjust |
+| **Guardian rotation** | Attacker with old key exhausts the pause window before rotation | Guardian auto-expiry + cooldown (T11) limits duty cycle to ≤50%; rotation completes in ~50 hours |
+| **Unpause** | Attacker monitors unpause proposal and crafts an exploit at execution | Unpause itself does not change peer/endpoint/guardian; the attacker's window is the time it takes their transaction to execute (1 block), and settlement guards (nonce, intent hash) prevent replay of old fills |
+
+**Residual exposure: Peer rotation race condition**
+
+If the EVM peer is rotated and the Soroban peer is not rotated simultaneously, there
+is a brief window where the two chains trust different counterparties. An attacker
+could:
+1. Observe the EVM peer rotation proposal
+2. Front-run by sending a FillConfirmed from Soroban (with the old EVM peer)
+3. Execute the EVM peer rotation
+4. Call lzReceive on EVM (which now rejects because the sender is the old peer)
+5. Exploit the mismatch
+
+**Mitigation for this race:**
+- Peer rotation should be coordinated: both chains rotate their peer in the same
+  governance window (on EVM: propose peer + Soroban admin calls set_peer in parallel)
+- The window for exploitation is ≤48 hours (EVM delay); it is closed by executing
+  a matching rotation on Soroban within that window
+- Document in the deployment runbook that peer rotations must be synchronized
+
+### Trade-offs considered
+
+| Approach | Chosen? | Rationale |
+|----------|---------|-----------|
+| Private/commit-reveal for timelock actions | No | Breaks governance transparency; added complexity; still vulnerable to post-reveal execution front-running |
+| Two-phase pause (halt-new + halt-release emergency mode) | No / Phase 2 | Deferred; current design provides liveness for in-flight transfers, which is acceptable given DVN trust assumption |
+| Immediate unpause without timelock (override path) | No | Breaks governance principle; a single compromised owner could unpause unilaterally |
+| Grace period for peer transitions (dual acceptance) | Phase 2 | Planned; allows old peer to fill into new peer until grace expires, reducing race-condition window |
+
+### Residual risk
+
+**Medium → Low.** Front-running of telegraphed actions is accepted architectural
+constraint:
+
+1. **Governance transparency is non-negotiable:** Hidden or delayed proposals break
+   the social contract with users and auditors
+2. **Peer rotation race condition:** Synchronized rotations close the window; future
+   grace periods narrow it further
+3. **Pause-excludes-releases:** Acceptable given DVN trust assumption; Phase 2 will
+   reconsider if needed
+
+**Operational mitigations:**
+- Coordinate peer rotations across chains within the timelock delay window
+- Monitor pending timelock operations in real time and escalate unexpected proposals
+- Use the guardian-pause routine drill (§9 in key-management.md) to ensure incident
+  response is practiced
+- If an exploit is suspected during a timelock action's delay, operators can `cancel()`
+  the action (1-of-N owner, no supermajority needed) and re-propose with fixes
+
+### Implementation notes
+
+- **No code changes:** This is architectural analysis, not code
+- **Threat model:** This section documents the stance on pause-excludes-releases
+  and telegraphed-timelock front-running
+- **Runbook:** Add peer-rotation synchronization guidance to deployment.md (Phase 2)
+- **Drill:** Quarterly rotation drill (key-management.md §9) includes a simulated
+  front-running scenario to test response time
