@@ -705,9 +705,40 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Refund fallback -----------------------------------------------------
 
-    /// @notice Permissionless local refund if no settlement landed within
-    ///         `deadline + confirmationGrace`. Shares the terminal-flag guard with
-    ///         the release path so exactly one terminal transition wins (I1/I2).
+    /// @notice Permissionless local refund fallback (issue #175). Callable by anyone
+    ///         once `deadline + confirmationGrace` has elapsed. Refunds the locked funds
+    ///         to the user, providing the ultimate liveness guarantee for the protocol.
+    ///
+    /// This is the **guaranteed refund path**: if a FillConfirmed message fails to
+    /// arrive from Stellar within the grace period, anyone can call this function
+    /// to recover the user's funds to prevent permanent loss.
+    ///
+    /// # Keeper model (issue #175)
+    /// This function is permissionless: any address can call it and refund any user.
+    /// The caller pays gas but receives no direct incentive. In practice, this means:
+    ///
+    /// **Primary caller (self-serve)**: The user (or an SDK/UI helper on their behalf)
+    /// detects an expired, unrefunded intent via the SDK's `waitForSettlement` status
+    /// query and calls `cancelExpired`. This is the expected and robust path:
+    /// users have access to the SDK, full information about their intents, and
+    /// motivation to recover their own funds.
+    ///
+    /// **Fallback (keeper/third-party)**: If the user is offline or unaware the
+    /// settlement failed, a keeper or relayer can recover their funds as a service
+    /// (possibly off-chain monitored). The protocol offers no incentive for this,
+    /// so it is best-effort only — do not rely on third-party keepers for liveness.
+    ///
+    /// # Liveness guarantee
+    /// The refund IS guaranteed to be available (barring contract pause) once the
+    /// grace period elapses. The guarantee is ENFORCED by the user's SDK helper
+    /// or a front-end integration that watches for expired intents. Liveness is
+    /// a **user responsibility**, not a protocol feature. If neither the user nor
+    /// any keeper calls `cancelExpired`, the funds remain locked until the grace
+    /// period expires naturally (but they will still be recoverable at that time).
+    ///
+    /// Shares the terminal-flag guard with the release path so exactly one terminal
+    /// transition wins (I1/I2). Shares reentrancy guard with other fund-moving paths.
+    ///
     /// @param intentHash The keccak256 intent commitment identifying the lock.
     function cancelExpired(bytes32 intentHash) external nonReentrant whenNotPaused {
         Lock storage l = locks[intentHash];

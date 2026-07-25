@@ -193,6 +193,50 @@ export class PerihelionClient {
     }
   }
 
+  /**
+   * Check if an intent is refundable via `cancelExpired` (issue #175).
+   *
+   * An intent is refundable if:
+   * 1. It exists and has not been settled or previously refunded.
+   * 2. Its deadline has passed (and the confirmation grace period has elapsed).
+   * 3. No FillConfirmed was received (status is still 'pending').
+   *
+   * This helper detects when a bridge has failed and the user's funds can be
+   * recovered locally without waiting for cross-chain confirmation.
+   *
+   * **Typical usage**: After `waitForSettlement` times out or returns 'expired',
+   * check `isRefundable` to see if the user can recover via the local fallback.
+   *
+   * ```ts
+   * const record = await client.waitForSettlement(hash);
+   * if (record.status === "expired") {
+   *   const refundable = client.isRefundable(record);
+   *   if (refundable) {
+   *     // Call escrow.cancelExpired(hash) to recover funds
+   *   }
+   * }
+   * ```
+   *
+   * @param record The intent record to check.
+   * @param confirmationGraceMs Optional confirmation grace period in milliseconds
+   *                            (must match the escrow's `confirmationGrace`).
+   *                            Defaults to 2 hours (the contract default).
+   * @returns True if the intent can be refunded via `cancelExpired`.
+   */
+  isRefundable(
+    record: IntentRecord,
+    confirmationGraceMs: number = 2 * 60 * 60 * 1_000,
+  ): boolean {
+    // Must not have been settled or refunded already.
+    if (record.status !== "pending" && record.status !== "locked") {
+      return false;
+    }
+    // Deadline + grace must have passed (in seconds; convert ms to s for comparison).
+    const now = Math.floor(Date.now() / 1_000);
+    const deadlineWithGrace = record.deadline + Math.floor(confirmationGraceMs / 1_000);
+    return now >= deadlineWithGrace;
+  }
+
   // ─── private helpers ───────────────────────────────────────────────────────
 
   /** Single fetch with a per-request timeout abort signal. */
