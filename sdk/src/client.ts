@@ -228,7 +228,7 @@ export class PerihelionClient {
     confirmationGraceMs: number = 2 * 60 * 60 * 1_000,
   ): boolean {
     // Must not have been settled or refunded already.
-    if (record.status !== "pending" && record.status !== "locked") {
+    if (record.status === "settled" || record.status === "refunded") {
       return false;
     }
     // Deadline + grace must have passed (in seconds; convert ms to s for comparison).
