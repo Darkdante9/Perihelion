@@ -220,6 +220,14 @@ export async function evaluate(
     return { fill: false, reason: "fee-inclusive profit is non-positive", terminal: false };
   }
   const profitBps = Number((profit * 10_000n) / proceeds);
+  if (profitBps < config.minMarginBps) {
+    return {
+      fill: false,
+      reason: `margin ${profitBps}bps below minimum ${config.minMarginBps}bps`,
+      terminal: false,
+      profitBps,
+    };
+  }
 
   // ── inventory check ───────────────────────────────────────────────────────
   // Use the caller-supplied provider if it exposes a balance, else unlimited.
