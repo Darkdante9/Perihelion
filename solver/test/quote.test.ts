@@ -93,6 +93,25 @@ test("rejects fee-inclusive loss-making intent", async () => {
   assert.equal(decision.terminal, false);
 });
 
+// ─── margin gate (#312) ──────────────────────────────────────────────────────
+// config.minMarginBps = 10 (see PERIHELION_MIN_MARGIN_BPS above). proceeds is
+// fixed at 10_000_000 for sourceAmount "1000000" under usdcDeps' 1:1 rate.
+
+test("rejects a profitable fill that is below the configured margin", async () => {
+  // profit = 10_000_000 - 9_995_000 = 5_000 -> profitBps = 5 (< 10bps minimum)
+  const decision = await evaluate(intent({ minDestAmount: "9995000" }), config, usdcDeps);
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, false);
+  assert.match(decision.reason, /margin/);
+});
+
+test("fills exactly at the configured margin boundary", async () => {
+  // profit = 10_000_000 - 9_990_000 = 10_000 -> profitBps = 10 (== 10bps minimum)
+  const decision = await evaluate(intent({ minDestAmount: "9990000" }), config, usdcDeps);
+  assert.equal(decision.fill, true);
+  assert.equal(decision.profitBps, 10);
+});
+
 // ─── decimal corridor tests (#87) ────────────────────────────────────────────
 
 test("18dp → 7dp corridor: ETH-like source to Stellar asset", async () => {
