@@ -44,6 +44,13 @@ test("fills a profitable, supported intent", async () => {
   assert.ok(decision.profitBps != null && decision.profitBps > 0);
 });
 
+test("rejects intent for a different chain (terminal)", async () => {
+  const decision = await evaluate(intent({ sourceChainId: 1 }), config, usdcDeps);
+  assert.equal(decision.fill, false);
+  assert.equal(decision.terminal, true);
+  assert.match(decision.reason, /wrong chain/);
+});
+
 test("rejects unsupported dest asset (terminal)", async () => {
   const decision = await evaluate(intent({ destAsset: "EURC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }), config, usdcDeps);
   assert.equal(decision.fill, false);

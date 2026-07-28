@@ -179,6 +179,13 @@ export async function evaluate(
   inFlight?: InFlightTracker,
 ): Promise<FillDecision> {
   // ── terminal checks ──────────────────────────────────────────────────────
+  if (intent.sourceChainId !== config.sourceChainId) {
+    return {
+      fill: false,
+      reason: `wrong chain ${intent.sourceChainId} (solver is on ${config.sourceChainId})`,
+      terminal: true,
+    };
+  }
   if (isExpired(intent)) {
     return { fill: false, reason: "intent expired", terminal: true };
   }
