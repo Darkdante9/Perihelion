@@ -41,6 +41,20 @@ versioned independently.
 
 ### Fixed
 
+- **EVM escrow:** `PerihelionEscrow` compiles again on solc 0.8.24 without
+  `via_ir`. `lock` is split into `_validateIntent`, `_pullFunds`, `_recordLock`
+  and `_dispatchFillInstruction` to stay under the 16-slot stack limit; check
+  order, effects and the `Locked` event are unchanged. Escrow bytecode pins
+  re-generated (#857).
+- **Toolchain:** Rust pin raised to 1.88.0 so the committed `Cargo.lock`
+  (`darling` 0.23, `serde_with` 3.21) builds. The Soroban workspace now declares
+  `rust-version = "1.88"` with the MSRV-aware resolver 3, `check-toolchain.sh`
+  fails if that drifts from `rust-toolchain.toml`, and the Soroban workflow
+  runs a `--locked` build so a lock update past the pin fails CI (#854).
+- **CI:** `differential-fuzz.yml` reads the Rust toolchain from
+  `rust-toolchain.toml` and verifies it instead of hard-coding 1.81.0 (#855).
+  The `cargo deny` job installs a prebuilt `cargo-deny` 0.20.2 instead of
+  compiling it with the project toolchain, so the policy check runs (#856).
 - The Soroban settlement contract's inbound-nonce storage no longer grows
   without bound: a per-eid low-water mark (`InboundNonceFloor`) plus the new
   permissionless `prune_nonce_words(eid)` entrypoint reclaims the rent of
