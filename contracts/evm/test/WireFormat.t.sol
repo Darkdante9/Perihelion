@@ -183,5 +183,66 @@ contract WireFormatConformanceTest is Test {
     // --- FillConfirmed negatives ---
 
     function test_FillConfirmedRejectsShortPayload() public {
+        bytes memory bad = _readNeg("fill_confirmed_short.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
+
+    function test_FillConfirmedRejectsLongPayload() public {
+        bytes memory bad = _readNeg("fill_confirmed_long.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
+
+    function test_FillConfirmedRejectsBadType() public {
+        bytes memory bad = _readNeg("fill_confirmed_bad_type.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_FillConfirmedRejectsBadVersion() public {
+        bytes memory bad = _readNeg("fill_confirmed_bad_version.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_FillConfirmedRejectsNonzeroHigh() public {
+        bytes memory bad = _readNeg("fill_confirmed_nonzero_high.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
+
+    // --- CancelIntent negatives ---
+
+    function test_CancelIntentRejectsShortPayload() public {
+        bytes memory bad = _readNeg("cancel_intent_short.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+
+    function test_CancelIntentRejectsLongPayload() public {
+        bytes memory bad = _readNeg("cancel_intent_long.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+
+    function test_CancelIntentRejectsBadType() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_type.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_CancelIntentRejectsBadVersion() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_version.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_CancelIntentRejectsBadReason() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_reason.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+}
 
 /* … truncated 7758 chars — edit only what you need near the top … */
