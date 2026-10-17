@@ -269,7 +269,7 @@ contract PerihelionTimelockTest is Test {
         assertEq(
             readyAtAfterRevoke,
             readyAtBefore,
-            "readyAt must not change on revoke — monotonic clock (issue #283)"
+            "readyAt must not change on revoke - monotonic clock (issue #283)"
         );
 
         // c re-confirms — threshold restored, but readyAt unchanged.

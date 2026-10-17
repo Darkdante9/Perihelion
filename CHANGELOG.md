@@ -41,6 +41,18 @@ versioned independently.
 
 ### Fixed
 
+- The differential-fuzz workflow runs again (#816, #823, #824, #825). It now
+  installs Foundry `stable` (the pinned nightly had been pruned and returned
+  HTTP 404), reads the Soroban SDK major version correctly (the greedy `sed`
+  always yielded an empty string), and takes its Rust toolchain from
+  `rust-toolchain.toml`. `contracts/soroban/Cargo.lock` pins `serde_with` 3.17
+  and `darling` 0.21, the newest releases that build on the pinned Rust 1.85
+  (3.21 / 0.23 need 1.88). The EVM test suite compiles again: the
+  `WireFormat.t.sol` tests truncated by #706 are restored with the 227-byte
+  FillInstruction vector lengths, and `Fork.t.sol`, `PerihelionTimelock.t.sol`,
+  `PerihelionEscrow.t.sol` and `Fuzz.t.sol` no longer use an invalid hex
+  literal, non-ASCII string literals or 7-field `locks()` destructures for the
+  8-field `Lock` struct.
 - The Soroban settlement contract's inbound-nonce storage no longer grows
   without bound: a per-eid low-water mark (`InboundNonceFloor`) plus the new
   permissionless `prune_nonce_words(eid)` entrypoint reclaims the rent of
