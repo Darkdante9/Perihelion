@@ -2953,3 +2953,31 @@ fn configured_max_ttl_sets_terminal_marker_ttl() {
     });
     assert_eq!(ttl, 3_500_000);
 }
+
+// --- Issue #912: every state-changing entrypoint keeps the instance live -----
+
+#[test]
+fn prune_bumps_instance_ttl_once_inside_threshold() {
+    use soroban_sdk::testutils::storage::Instance as _;
+    let s = setup();
+
+    // The constructor left the instance at the full policy TTL. Advance so that
+    // only `remaining` ledgers are left, which is inside the bump threshold.
+    let remaining = INSTANCE_TTL_THRESHOLD / 2;
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += INSTANCE_TTL_EXTEND - remaining;
+    });
+    let before = s
+        .env
+        .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
+    assert_eq!(before, remaining);
+
+    // prune_nonce_words needs no intent record, so the instance is the only
+    // entry that can be bumped here.
+    s.client.prune_nonce_words(&s.src_eid);
+
+    let after = s
+        .env
+        .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
+    assert_eq!(after, INSTANCE_TTL_EXTEND);
+}
