@@ -1120,8 +1120,8 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
         env.storage().persistent().extend_ttl(
             &DataKey::Settled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
@@ -1195,8 +1195,8 @@ impl Perihelion {
         // (issue #284 / #29 retention-asymmetry invariant).
         env.storage().persistent().extend_ttl(
             &DataKey::ConfirmationSent(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
 
         rec.status = IntentStatus::ConfirmationSent;
@@ -1309,13 +1309,13 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
         env.storage().persistent().extend_ttl(
             &DataKey::Settled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
         env.storage().persistent().extend_ttl(
             &DataKey::ConfirmationSent(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
         env.storage().instance().extend_ttl(17_280, 1_209_600);
 
@@ -1403,8 +1403,8 @@ impl Perihelion {
             .set(&DataKey::Cancelled(intent_hash.clone()), &true);
         env.storage().persistent().extend_ttl(
             &DataKey::Cancelled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
 
         Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
@@ -1878,7 +1878,7 @@ impl Perihelion {
         // REPLAY-SAFETY: archival of this entry re-opens the 64 nonces it
         // covers. Always extend TTL to MAX_TTL so the word outlives any
         // realistic in-flight delivery window.
-        ps.extend_ttl(&word_key, MAX_TTL / 2, MAX_TTL);
+        ps.extend_ttl(&word_key, Self::max_ttl(env) / 2, Self::max_ttl(env));
         Ok(())
     }
 
@@ -2088,8 +2088,8 @@ impl Perihelion {
                     .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
                 env.storage().persistent().extend_ttl(
                     &DataKey::Cancelled(ci.intent_hash.clone()),
-                    MAX_TTL / 2,
-                    MAX_TTL,
+                    Self::max_ttl(env) / 2,
+                    Self::max_ttl(env),
                 );
                 env.events().publish(
                     (events::cancelled_inbound(env), ci.intent_hash.clone()),
@@ -2201,25 +2201,35 @@ impl Perihelion {
         Ok(())
     }
 
-    /// TTL bump target covering `deadline + GRACE`, clamped to `MAX_TTL`.
+    /// Persistent-entry TTL ceiling: the admin-configured `MaxTtl` (issue #340),
+    /// or `MAX_TTL_DEFAULT` when unset. Every persistent extension targets this
+    /// value, so `set_max_ttl` controls the archival policy it advertises (#911).
+    fn max_ttl(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTtl)
+            .unwrap_or(MAX_TTL_DEFAULT)
+    }
+
+    /// TTL bump target covering `deadline + GRACE`, clamped to the configured max TTL.
     ///
     /// Divides by `MIN_SECS_PER_LEDGER` (4 s) to over-provision the ledger
     /// count when actual close times are longer. This is the safe direction:
     /// a too-generous TTL wastes a small amount of rent but an under-estimate
     /// can archive the entry before the deadline passes.
     ///
-    /// The division and `.min(MAX_TTL as u64)` clamp are performed in `u64`
+    /// The division and `.min(max_ttl as u64)` clamp are performed in `u64`
     /// **before** the cast to `u32` (issue #30). A plain `as u32` on a `u64`
     /// value exceeding `u32::MAX` wraps modulo 2^32, producing a deceptively
     /// small TTL for a far-future deadline. By clamping first we guarantee the
-    /// value is provably in `[0, MAX_TTL]` when narrowed.
+    /// value is provably in `[0, max_ttl]` when narrowed.
     fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
         let now = env.ledger().timestamp();
         let secs = deadline.saturating_sub(now);
         let ledgers_u64 = (secs / MIN_SECS_PER_LEDGER)
             .saturating_add(GRACE_LEDGERS as u64)
-            .min(MAX_TTL as u64);
-        // Safe: value is in [0, MAX_TTL] ⊆ [0, u32::MAX].
+            .min(Self::max_ttl(env) as u64);
+        // Safe: value is in [0, max_ttl] ⊆ [0, u32::MAX].
         ledgers_u64 as u32
     }
 }

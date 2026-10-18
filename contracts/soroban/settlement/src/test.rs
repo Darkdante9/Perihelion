@@ -2924,3 +2924,32 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     s.client.dispatch_confirmation(&keeper, &h, &0);
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
 }
+
+// --- Issue #911: the configured MaxTtl drives persistent TTL extensions ----
+
+#[test]
+fn configured_max_ttl_sets_terminal_marker_ttl() {
+    let s = setup();
+    // A network whose max_entry_ttl sits above the compile-time default, and an
+    // admin who has raised the contract's extension target to match.
+    s.env.ledger().with_mut(|li| li.max_entry_ttl = 4_000_000);
+    s.client.set_max_ttl(&3_500_000);
+
+    let recipient = Address::generate(&s.env);
+    let caller = Address::generate(&s.env);
+    let h = hash(&s.env, 0x91);
+    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
+
+    s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
+    s.client.cancel_expired_intent(&caller, &h, &0);
+
+    // The Cancelled marker is extended to the configured target, not MAX_TTL_DEFAULT.
+    use soroban_sdk::testutils::storage::Persistent as _;
+    let ttl = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::Cancelled(h.clone()))
+    });
+    assert_eq!(ttl, 3_500_000);
+}
