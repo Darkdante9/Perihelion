@@ -1934,10 +1934,9 @@ impl Perihelion {
                             .unwrap_or(0);
                         if window_start > latest_window_start {
                             storage.set(&DataKey::LatestWindowStart, &window_start);
-                            // In a new window; prior bucket is abandoned. Restart accumulator.
-                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
-                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
-                            }
+                            // Leaving the memoized window: drop its bucket so that at most
+                            // one bucket exists, however many quiet windows pass (#905).
+                            storage.remove(&DataKey::RollingWindowBucket(latest_window_start));
                         }
 
                         // Accumulate this intent's amount into the current window.

@@ -2631,6 +2631,33 @@ fn get_rolling_window_reset_at_reports_latched_reset_time() {
 }
 
 #[test]
+fn rolling_window_keeps_one_bucket_across_quiet_windows() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000_000);
+    let recipient = Address::generate(&s.env);
+
+    // Traffic in window 0, then in window 2 after a quiet window 1, then in
+    // window 5 after two more quiet windows. Each advance must drop the bucket
+    // of the window it leaves (#905).
+    for (nonce, ts) in [(1u64, 1_000u64), (2, 7_300), (3, 18_100)] {
+        s.env.ledger().with_mut(|li| li.timestamp = ts);
+        try_deliver_fill_bytes(&s, &hash(&s.env, nonce as u8), &recipient, 10, nonce)
+            .expect("within cap");
+    }
+
+    let windows = [0u64, 3_600, 7_200, 10_800, 14_400, 18_000];
+    for w in windows {
+        let present = s.env.as_contract(&s.client.address, || {
+            s.env
+                .storage()
+                .instance()
+                .has(&DataKey::RollingWindowBucket(w))
+        });
+        assert_eq!(present, w == 18_000, "bucket for window {w}");
+    }
+}
+
+#[test]
 fn rolling_window_latch_rejects_until_admin_reset() {
     let s = setup();
     s.client.set_rolling_window_cap(&3_600, &1_000);
