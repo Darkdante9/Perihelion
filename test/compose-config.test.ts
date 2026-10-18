@@ -82,3 +82,26 @@ test("relayer uses local placeholder endpoint ids, not real LayerZero ones", () 
   assert.equal(env?.PERIHELION_SOURCE_EID, LOCAL_EVM_EID);
   assert.equal(env?.PERIHELION_STELLAR_EID, LOCAL_STELLAR_EID);
 });
+
+// Required interpolation: `${VAR:?message}` fails `docker compose` when VAR is
+// unset. A `:-default` would silently fall back to a value that is not deployed.
+const REQUIRED = /^\$\{[A-Z_]+:\?.+\}$/;
+
+test("escrow address is required, not defaulted to an Anvil account", () => {
+  for (const name of ["mempool", "relayer", "solver"]) {
+    const value = String(service(name).environment?.PERIHELION_ESCROW_ADDRESS);
+    assert.match(value, REQUIRED, name);
+  }
+});
+
+test("settlement contract ids are required, not hard-coded to an undeployed contract", () => {
+  assert.match(
+    String(service("relayer").environment?.PERIHELION_SETTLEMENT_CONTRACT),
+    REQUIRED,
+  );
+  assert.match(
+    String(service("solver").environment?.PERIHELION_SETTLEMENT_CONTRACT_ID),
+    REQUIRED,
+  );
+  assert.doesNotMatch(RAW, /CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS/);
+});
