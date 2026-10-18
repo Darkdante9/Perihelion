@@ -50,6 +50,15 @@ versioned independently.
 - The Soroban settlement crate compiles again: over-long `symbol_short!`
   event topics and test-only compile errors that had been hidden behind the
   `messages.rs` parse error are fixed (#678, #679).
+- The Soroban settlement crate builds again: `MIN_MAX_TTL` and
+  `MAX_TTL_CEILING`, the `set_max_ttl` bounds documented by #719, are declared
+  again after being lost in a merge (#852). The test suite compiles against the
+  three-argument `propose_peer(eid, peer, &delay)`; tests that only need a
+  configured peer now share one `register_peer` helper (#853).
+- The differential-fuzz workflow runs again: Foundry is installed from
+  `stable` instead of a pruned nightly pin that returned HTTP 404, and the
+  Soroban SDK/CLI major-version check no longer reads an empty SDK major
+  (#835, #826).
 
 ### Changed
 
