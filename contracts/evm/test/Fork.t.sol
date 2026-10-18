@@ -90,7 +90,7 @@ contract ForkTest is Test {
     uint256 internal userPk = 0xA11CE;
     address internal user;
     address internal solver = address(0x5012E5);
-    address internal deployer = address(0xDEPLOY);
+    address internal deployer = makeAddr("deployer");
     bytes32 internal constant SALT = bytes32(uint256(1));
 
     // Known-good bytecode hashes (computed on first successful deploy).
