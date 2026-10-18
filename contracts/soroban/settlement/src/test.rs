@@ -2917,3 +2917,54 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     s.client.dispatch_confirmation(&keeper, &h, &0);
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
 }
+
+// --- Issue #906: value caps must not sum across destination assets ---------
+
+#[test]
+fn rolling_window_cap_does_not_sum_across_destination_assets() {
+    let s = setup();
+    // One window cap of 1_000 units, shared by every intent that reaches
+    // `enforce_value_caps`. Each asset should get its own budget, so 800 of
+    // asset A and 800 of asset B must both be accepted in the same window.
+    s.client.set_rolling_window_cap(&3_600u64, &1_000i128);
+
+    register_intent(
+        &s,
+        &hash(&s.env, 0x91),
+        &Address::generate(&s.env),
+        800,
+        5_000,
+        1,
+        None,
+    );
+
+    let other_issuer = Address::generate(&s.env);
+    let other_asset = s
+        .env
+        .register_stellar_asset_contract_v2(other_issuer)
+        .address();
+    let fi = FillInstruction {
+        intent_hash: hash(&s.env, 0x92),
+        src_eid: s.src_eid,
+        recipient: Address::generate(&s.env),
+        dest_asset: other_asset,
+        min_dest_amount: 800,
+        deadline: 5_000,
+        preferred_solver: None,
+        locked_solver: None,
+        reservation_window: 0,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    assert!(
+        s.client
+            .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi))
+            .is_ok(),
+        "a breach-free amount on a second asset must not be rejected by the first asset's window"
+    );
+    assert!(!s.client.is_rolling_window_cap_triggered());
+}
