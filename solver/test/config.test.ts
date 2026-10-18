@@ -135,6 +135,7 @@ function baseExecutorEnv() {
     PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
     PERIHELION_SETTLEMENT_CONTRACT_ID: "0".repeat(64),
     PERIHELION_SOURCE_CHAIN_ID: "8453",
+    STELLAR_NETWORK: "testnet",
   };
 }
 
@@ -167,6 +168,14 @@ test("loadExecutorConfig rejects a non-positive source chain id", () => {
   assert.throws(
     () => loadExecutorConfig({ ...baseExecutorEnv(), PERIHELION_SOURCE_CHAIN_ID: "-1" }),
     /PERIHELION_SOURCE_CHAIN_ID must be a positive integer/,
+  );
+});
+
+test("loadExecutorConfig rejects a missing STELLAR_NETWORK", () => {
+  const { STELLAR_NETWORK: _omitted, ...env } = baseExecutorEnv();
+  assert.throws(
+    () => loadExecutorConfig(env),
+    /STELLAR_NETWORK is required/,
   );
 });
 

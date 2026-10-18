@@ -17,7 +17,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
 import { request } from "node:http";
-import { loadConfig } from "../src/config.js";
 import { Relayer } from "../src/relayer.js";
 import { HealthServer } from "../src/health-server.js";
 import type { Logger, SourceWatcher, DestinationDelivery } from "../src/relayer.js";
@@ -29,13 +28,6 @@ import { validConfigEnv } from "./fixtures.js";
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
 
-function baseConfig() {
-  return loadConfig({
-    ...validConfigEnv(),
-    PERIHELION_POLL_INTERVAL_MS: "1000",
-  });
-}
-
 function makeRelayer(pollOverride?: () => Promise<{ messages: never[]; head: number }>): Relayer {
   const watcher: SourceWatcher = {
     poll: pollOverride ?? (async () => ({ messages: [], head: 10 })),
@@ -44,7 +36,7 @@ function makeRelayer(pollOverride?: () => Promise<{ messages: never[]; head: num
     async deliver() { return "0xdst"; },
     async isDelivered() { return false; },
   };
-  return new Relayer(baseConfig(), watcher, delivery, silent);
+  return new Relayer(validConfigEnv(), watcher, delivery, silent);
 }
 
 /** Find a free port by creating a temporary server. */

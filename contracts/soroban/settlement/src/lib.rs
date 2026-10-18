@@ -149,6 +149,19 @@ pub const MAX_TTL_DEFAULT: u32 = 3_110_400;
 // Re-export for backwards compatibility and convenience.
 pub const MAX_TTL: u32 = MAX_TTL_DEFAULT;
 
+/// Lower bound accepted by `set_max_ttl` (issue #719). The contract extends its
+/// longest-lived entries — the `Settled`/`Cancelled` idempotency markers,
+/// `ConfirmationSent` records and nonce-bitmap words — to `MAX_TTL`, so a clamp
+/// below that target would let them expire before the protocol's replay-safety
+/// argument assumes. Values under this bound are rejected rather than stored.
+pub const MIN_MAX_TTL: u32 = MAX_TTL_DEFAULT;
+
+/// Upper bound accepted by `set_max_ttl` (issue #719). A clamp above the
+/// network's real `max_entry_ttl` is silently ineffective, so values above the
+/// protocol ceiling for `max_entry_ttl` (~1 year at ~5 s/ledger) are rejected
+/// instead of being stored as an apparently valid but inert configuration.
+pub const MAX_TTL_CEILING: u32 = 6_312_000;
+
 /// Cap on how many fully-consumed `InboundNonceWord` entries
 /// `prune_nonce_words` may delete in one call (issue #718). 256 words × 64
 /// nonces = up to 16,384 nonces reclaimed per invocation, bounding the scan

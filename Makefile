@@ -338,9 +338,9 @@ fuzz-cross: ## Run cross-language validation (Soroban corpus → Solidity decode
 		echo "⏭ skipping fuzz-cross — forge not installed (install: https://getfoundry.sh)"; \
 	fi
 
-clean-corpus: ## Remove generated fuzz corpus files
+clean-corpus: ## Remove generated fuzz corpus files (tracked regression inputs are left intact)
 	@echo "▶ clean-corpus"
-	@rm -f contracts/shared/wire-vectors/fuzz-corpus/*.hex
+	@rm -f contracts/soroban/target/fuzz-corpus/*.hex
 	@rm -rf contracts/soroban/settlement/proptest-regressions/
 	@echo "Corpus cleaned."
 
