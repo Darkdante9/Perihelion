@@ -1043,6 +1043,15 @@ impl Perihelion {
         intent_hash: &BytesN<32>,
         fill_amount: i128,
     ) -> Result<(DataKey, IntentRecord), PerihelionError> {
+        // The EVM escrow decodes solver_evm as a 20-byte address left-padded to
+        // 32 bytes and reverts on anything else. That revert happens after the
+        // destination transfer has settled here, so the fill could not be
+        // recovered. Reject the malformed shape before any token moves.
+        let raw = solver_evm.to_array();
+        if raw[..12].iter().any(|b| *b != 0) || raw[12..].iter().all(|b| *b == 0) {
+            return Err(PerihelionError::InvalidSolverEvm);
+        }
+
         // Terminal-state guard via cheap markers (survives record archival).
         if Self::is_finalized(env, intent_hash) {
             return Err(PerihelionError::IntentFinalized);

@@ -25,7 +25,7 @@ use soroban_sdk::{
 };
 
 // Re-use test harness from main test module
-use crate::test::{hash, register_intent, setup, Setup};
+use crate::test::{evm_solver, hash, register_intent, setup, Setup};
 
 /// Advance the ledger by `ledgers` ledgers, incrementing both sequence and timestamp.
 /// Assumes a 5-second ledger close time for timestamp progression.
@@ -108,7 +108,7 @@ fn fill_intent_succeeds_after_manual_restore() {
     // In production, the caller must include the Intent key in the restore footprint.
     // We document this requirement and verify the fill still works.
     
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     
     // Fill should succeed if the entry is restored
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
@@ -160,7 +160,7 @@ fn settled_marker_survives_after_record_archived() {
     register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
     
     // Fill the intent immediately
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     assert!(s.client.is_settled(&h), "marker should be set");
@@ -251,7 +251,7 @@ fn fill_rejected_when_settled_marker_exists_but_record_archived() {
     register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
     
     // Fill the intent
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     // Advance to archive window
@@ -284,7 +284,7 @@ fn cancel_rejected_when_settled_marker_exists_but_record_archived() {
     register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
     
     // Fill the intent
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     // Advance to archive window and past deadline
@@ -310,7 +310,7 @@ fn status_view_returns_correct_state_when_only_markers_exist() {
     register_intent(&s, &h, &recipient, 100_000, deadline, 1, None);
     
     // Fill the intent
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     // Verify initial state
@@ -375,7 +375,7 @@ fn document_client_restore_footprint_requirement() {
     // In our test environment, entries aren't actually archived, but we verify
     // the contract logic handles the restored-entry case correctly:
     
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     assert!(s.client.is_settled(&h), "fill should succeed after restore");
@@ -402,7 +402,7 @@ fn fill_extends_ttl_of_record_and_marker() {
     let initial_seq = s.env.ledger().sequence();
     
     // Fill the intent (this extends TTLs)
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
     
     // The contract extends:

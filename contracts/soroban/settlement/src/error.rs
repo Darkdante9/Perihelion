@@ -90,6 +90,9 @@ pub enum PerihelionError {
     /// an opaque revert from inside the endpoint client, so solver operators can
     /// distinguish fee estimation bugs from other dispatch failures.
     InsufficientLzFee = 164,
+    /// `solver_evm` is not a 20-byte EVM address left-padded to 32 bytes, or is
+    /// the zero address. Rejected before any token moves (issue #917).
+    InvalidSolverEvm = 165,
 
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.
