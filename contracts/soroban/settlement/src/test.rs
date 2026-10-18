@@ -2999,3 +2999,36 @@ fn expired_peer_proposal_is_cleared_and_allows_new_proposal() {
         "a corrected peer must be proposable immediately after an expired proposal"
     );
 }
+
+// --- Issue #908: the endpoint must only rotate through the delayed path -----
+
+#[test]
+fn set_endpoint_cannot_rotate_endpoint_instantly() {
+    let s = setup();
+    let original = s.client.endpoint();
+    let new_ep = Address::generate(&s.env);
+
+    assert!(
+        s.client.try_set_endpoint(&new_ep).is_err(),
+        "set_endpoint must not rotate the trusted endpoint in one transaction"
+    );
+    assert_eq!(s.client.endpoint(), original);
+}
+
+#[test]
+fn endpoint_rotates_only_after_delayed_propose_and_confirm() {
+    let s = setup();
+    let new_ep = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&new_ep);
+    assert!(
+        s.client.try_confirm_endpoint().is_err(),
+        "confirm_endpoint must wait for MIN_PEER_CHANGE_DELAY"
+    );
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.try_confirm_endpoint().is_ok());
+    assert_eq!(s.client.endpoint(), new_ep);
+}
