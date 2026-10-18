@@ -2968,3 +2968,34 @@ fn rolling_window_cap_does_not_sum_across_destination_assets() {
     );
     assert!(!s.client.is_rolling_window_cap_triggered());
 }
+
+// --- Issue #907: expired peer proposals must be cleared, not rolled back ---
+
+#[test]
+fn expired_peer_proposal_is_cleared_and_allows_new_proposal() {
+    let s = setup();
+    let stale_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    let corrected_peer = BytesN::from_array(&s.env, &[0xFE; 32]);
+    s.client
+        .propose_peer(&s.src_eid, &stale_peer, &MIN_PEER_CHANGE_DELAY);
+
+    // Move past delay + grace so the proposal is expired.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
+    });
+    // The confirm attempt must not leave the stale proposal behind. An `Err`
+    // return would roll back the cleanup, so the pending entry has to be gone
+    // on its own merits.
+    let _ = s.client.try_confirm_peer(&s.src_eid);
+
+    assert!(matches!(
+        s.client.try_get_pending_peer(&s.src_eid),
+        Ok(Ok(None))
+    ));
+    assert!(
+        s.client
+            .try_propose_peer(&s.src_eid, &corrected_peer, &MIN_PEER_CHANGE_DELAY)
+            .is_ok(),
+        "a corrected peer must be proposable immediately after an expired proposal"
+    );
+}
