@@ -45,7 +45,7 @@
  * 94      69    destAsset (asset identifier string, right-zero-padded)
  * 163     16    minDestAmount (uint128, non-negative)
  * 179     8     deadline (uint64)
- * 187     32    preferredSolver (EVM address, left-zero-padded)
+ * 187     32    lockedSolver (EVM address, left-zero-padded)
  * 219     8     reservationWindow (uint64, zero for legacy EVM intents)
  *         ───
  *         227   total bytes
@@ -72,7 +72,49 @@ import {
   type Hex,
 } from "viem";
 import type { SourceWatcher } from "./relayer.js";
-import type { BridgeMessage, PendingMessage, EndpointId } from "./types.js";
+import {
+  FILL_INSTRUCTION_LENGTH,
+  type BridgeMessage,
+  type PendingMessage,
+  type EndpointId,
+} from "./types.js";
+
+/** Build the exact canonical EVM FillInstruction payload used by the escrow. */
+function canonicalFillInstruction(
+  intentHash: Hex,
+  solver: Hex,
+  stellarEid: number,
+  destination: string,
+  destAsset: string,
+  minDestAmount: bigint,
+  deadline: bigint,
+): Hex {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(intentHash)) throw new Error("invalid intent hash");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(solver)) throw new Error("invalid solver address");
+  if (stellarEid < 0 || stellarEid > 0xffffffff) throw new Error("invalid destination eid");
+  if (minDestAmount < 0n || minDestAmount > 0xffffffffffffffffffffffffffffffffn) {
+    throw new Error("min destination amount does not fit uint128");
+  }
+  if (deadline < 0n || deadline > 0xffffffffffffffffn) throw new Error("deadline does not fit uint64");
+
+  const recipient = Buffer.from(destination, "utf8");
+  const asset = Buffer.from(destAsset, "utf8");
+  if (recipient.length > 56 || asset.length > 69) throw new Error("canonical field exceeds wire width");
+
+  const out = Buffer.alloc(FILL_INSTRUCTION_LENGTH);
+  out[0] = 0x01;
+  out[1] = 0x01;
+  Buffer.from(intentHash.slice(2), "hex").copy(out, 2);
+  out.writeUInt32BE(stellarEid, 34);
+  recipient.copy(out, 38);
+  asset.copy(out, 94);
+  Buffer.from(minDestAmount.toString(16).padStart(32, "0"), "hex").copy(out, 163);
+  Buffer.from(deadline.toString(16).padStart(16, "0"), "hex").copy(out, 179);
+  // Canonical locking solver is a left-padded bytes32 EVM address.
+  Buffer.from(solver.slice(2), "hex").copy(out, 199);
+  // reservation_window is currently zero until included in the signed EVM intent.
+  return `0x${out.toString("hex")}` as Hex;
+}
 
 // ---------------------------------------------------------------------------
 // ABIs
@@ -310,14 +352,16 @@ export class EVMSourceWatcher implements SourceWatcher {
     let destination: string;
     let destAsset: string;
     let minDestAmount: bigint;
+    let deadline: bigint;
     try {
-      const [, , dst, assetStr, minDest] = decodeAbiParameters(
+      const [, , dst, assetStr, minDest, deadlineValue] = decodeAbiParameters(
         LOCKED_DATA_PARAMS,
         log.data as Hex,
       );
       destination = dst as string;
       destAsset = assetStr as string;
       minDestAmount = minDest as bigint;
+      deadline = deadlineValue as bigint;
     } catch {
       return null;
     }
@@ -338,6 +382,10 @@ export class EVMSourceWatcher implements SourceWatcher {
       destAsset: destAsset,
       amount: minDestAmount.toString(),
       nonce,
+      rawPayload: canonicalFillInstruction(
+        intentHash as Hex, solver as Hex, this.config.stellarEid,
+        destination, destAsset, minDestAmount, deadline,
+      ),
     };
 
     return {

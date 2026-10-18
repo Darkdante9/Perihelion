@@ -18,7 +18,13 @@ import {
   type Account,
 } from "@stellar/stellar-sdk";
 import { FatalError, type DestinationDelivery } from "./relayer.js";
-import type { PendingMessage, MessageKey, MessageType } from "./types.js";
+import {
+  CANCEL_INTENT_LENGTH,
+  FILL_INSTRUCTION_LENGTH,
+  type PendingMessage,
+  type MessageKey,
+  type MessageType,
+} from "./types.js";
 
 /** Configuration for SorobanDestinationDelivery. */
 export interface SorobanDeliveryConfig {
@@ -270,117 +276,34 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
     pending: PendingMessage,
   ): Promise<TransactionBuilder> {
     const { message } = pending;
-    const { srcEid, intentHash, solver, recipient, destAsset, amount, nonce, messageType } = message;
-
+    const { srcEid, nonce, rawPayload } = message;
+    if (!/^0x[0-9a-fA-F]+$/.test(rawPayload)) {
+      throw new FatalError("Missing canonical LayerZero message payload");
+    }
+    const payloadLength = (rawPayload.length - 2) / 2;
+    const expectedLength = message.messageType === "FillInstruction"
+      ? FILL_INSTRUCTION_LENGTH
+      : CANCEL_INTENT_LENGTH;
+    if (payloadLength !== expectedLength) {
+      throw new FatalError(`Invalid canonical payload length: ${payloadLength}`);
+    }
     const contract = new Contract(this.settlementContractId);
-
-    // 1. Resolve peer sender (Origin.sender: BytesN<32>)
-    let senderBytes = await this.getPeer(srcEid);
+    const senderBytes = await this.getPeer(srcEid);
     if (!senderBytes) {
-      senderBytes = evmAddressTo32Bytes(this.config.escrowAddress);
+      throw new FatalError(`No trusted peer configured for source eid ${srcEid}`);
     }
-
-    // 2. Build Origin struct
-    // struct Origin { nonce: u64, sender: BytesN<32>, src_eid: u32 }
-    // Soroban struct map entries must be sorted alphabetically by field name:
-    // "nonce" < "sender" < "src_eid"
     const originScVal = xdr.ScVal.scvMap([
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("nonce"),
-        val: nativeToScVal(BigInt(nonce), { type: "u64" }),
-      }),
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("sender"),
-        val: xdr.ScVal.scvBytes(senderBytes),
-      }),
-      new xdr.ScMapEntry({
-        key: xdr.ScVal.scvSymbol("src_eid"),
-        val: nativeToScVal(srcEid, { type: "u32" }),
-      }),
+      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("nonce"), val: nativeToScVal(BigInt(nonce), { type: "u64" }) }),
+      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("sender"), val: xdr.ScVal.scvBytes(senderBytes) }),
+      new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("src_eid"), val: nativeToScVal(srcEid, { type: "u32" }) }),
     ]);
-
-    // 3. Build GUID (BytesN<32>)
     const guidScVal = xdr.ScVal.scvBytes(Buffer.alloc(32));
-
-    // 4. Build LzMessage enum: FillInstruction or Cancel
-    const hashScVal = this.intentHashScVal(intentHash);
-
-    let messageScVal: xdr.ScVal;
-
-    if (messageType === "CancelIntent") {
-      // struct CancelInstruction { intent_hash: BytesN<32>, reason: u32 }
-      // Sorted keys: "intent_hash" < "reason"
-      const cancelScVal = xdr.ScVal.scvMap([
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("intent_hash"),
-          val: hashScVal,
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("reason"),
-          val: nativeToScVal(0, { type: "u32" }),
-        }),
-      ]);
-      messageScVal = xdr.ScVal.scvVec([
-        xdr.ScVal.scvSymbol("Cancel"),
-        cancelScVal,
-      ]);
-    } else {
-      // FillInstruction
-      const recipientAddress = toAddressScVal(recipient);
-      const destAssetAddress = this.resolveDestAssetScVal(destAsset);
-      const preferredSolverScVal =
-        solver && (solver.startsWith("G") || solver.startsWith("C"))
-          ? toAddressScVal(solver)
-          : xdr.ScVal.scvVoid();
-
-      // struct FillInstruction sorted keys:
-      // "deadline", "dest_asset", "intent_hash", "min_dest_amount",
-      // "preferred_solver", "recipient", "reservation_window", "src_eid"
-      const fillScVal = xdr.ScVal.scvMap([
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("deadline"),
-          val: nativeToScVal(0n, { type: "u64" }),
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("dest_asset"),
-          val: destAssetAddress,
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("intent_hash"),
-          val: hashScVal,
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("min_dest_amount"),
-          val: nativeToScVal(BigInt(amount || "0"), { type: "i128" }),
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("preferred_solver"),
-          val: preferredSolverScVal,
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("recipient"),
-          val: recipientAddress,
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("reservation_window"),
-          val: nativeToScVal(0n, { type: "u64" }),
-        }),
-        new xdr.ScMapEntry({
-          key: xdr.ScVal.scvSymbol("src_eid"),
-          val: nativeToScVal(srcEid, { type: "u32" }),
-        }),
-      ]);
-
-      messageScVal = xdr.ScVal.scvVec([
-        xdr.ScVal.scvSymbol("FillInstruction"),
-        fillScVal,
-      ]);
-    }
-
-    builder.addOperation(
-      contract.call("lz_receive", originScVal, guidScVal, messageScVal),
-    );
-
+    builder.addOperation(contract.call(
+      "lz_receive_bytes",
+      originScVal,
+      guidScVal,
+      nativeToScVal(Buffer.from(rawPayload.slice(2), "hex"), { type: "bytes" }),
+    ));
     return builder;
   }
 
@@ -403,14 +326,4 @@ function toAddressScVal(addr: string): xdr.ScVal {
   } catch {
     return nativeToScVal(addr, { type: "address" });
   }
-}
-
-function evmAddressTo32Bytes(address?: string): Buffer {
-  const buf = Buffer.alloc(32);
-  if (!address) return buf;
-  const clean = address.startsWith("0x") ? address.slice(2) : address;
-  if (clean.length === 40) {
-    Buffer.from(clean, "hex").copy(buf, 0);
-  }
-  return buf;
 }

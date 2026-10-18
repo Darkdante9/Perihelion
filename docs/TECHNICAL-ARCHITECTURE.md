@@ -652,7 +652,8 @@ impl Perihelion {
                 dst_eid: rec.src_eid,
                 receiver: peer,
                 message,
-                options: default_options(&env),
+                options: Bytes::new(&env),
+                pay_in_lz_token: false,
             },
             &caller,
             &lz_fee,
@@ -956,15 +957,16 @@ fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 | 94 | 69 | `dest_asset` | Canonical Stellar asset text, including `CODE:ISSUER`, right-zero-padded if needed. |
 | 163 | 16 | `min_dest_amount` | u128 slippage floor. |
 | 179 | 8 | `deadline` | u64 unix seconds. |
-| 187 | 32 | `preferred_solver` | EVM address in a 32-byte word, or 32 zero bytes for open. |
-| **219** | | **total** | |
+| 187 | 32 | `locked_solver` | EVM address that called `lock`, left-padded to 32 bytes. Mandatory in canonical release payloads and exclusive until the reservation window expires. |
+| 219 | 8 | `reservation_window` | Exclusive duration in seconds, bounded by `deadline`; after expiry another solver may fill before the source refund grace period closes. |
+| **227** | | **total** | |
 
 **`FillConfirmed` (Stellar → source)** — authorizes solver payout on source.
 
 | Offset | Size | Field | Consumer | Description |
 |--------|------|-------|----------|-------------|
 | 2 | 32 | `intent_hash` | **EVM escrow** | Identifies the lock to release. Must match a live, unfinalized lock. |
-| 34 | 32 | `solver_evm` | **EVM escrow** | Left-padded EVM payout address. The escrow transfers `l.amount` to this address. May differ from the locking solver key (hot lock / cold payout). |
+| 34 | 32 | `solver_evm` | **EVM escrow** | Left-padded EVM payout identity. It must equal `locked_solver` while the reservation window is active; after expiry it may identify the solver that completed the permissionless fill. |
 | 66 | 16 | `fill_amount` | **Off-chain / event log** | u128 Stellar-side delivery amount — **informational only**. Does not control the EVM release; the escrow releases `l.amount` (the measured-delta locked value). Decoded and emitted in the `Released` event for off-chain reconciliation without a separate RPC call. Encoding as u128 matches the `min_dest_amount` width in FillInstruction. |
 | 82 | 8 | `fill_ledger` | **Off-chain / event log** | u64 Stellar ledger sequence at fill time — **informational only**. Sourced from `u32 env.ledger().sequence()` and widened to u64 on the wire: (1) future-proofs against the eventual Stellar u32 overflow (~136 years at current rates) without a breaking wire change; (2) matches the EVM `uint64` receiver width. Decoded and emitted in `Released` for dispute resolution and explorer display. |
 | **90** | | **total** | | |
@@ -1082,7 +1084,16 @@ one dispatch path:
 | `lz_receive` | `message: LzMessage` | The endpoint (or adapter) already decoded the payload and marshals a typed `LzMessage` through the Soroban ABI. |
 | `lz_receive_bytes` | `message: Bytes` | The endpoint hands over the unmodified LayerZero `message` bytes. The contract decodes them itself. |
 
-Both entrypoints run the same sequence:
+Release builds expose one production inbound message entrypoint: `lz_receive_bytes`.
+It authenticates the endpoint and peer, parses the canonical LayerZero message bytes,
+and applies nonce/pause/handler checks. The former typed `lz_receive` adapter is
+compiled only for tests or when the explicitly opt-in `typed-inbound` feature is
+enabled; it is never a release bypass.
+
+The relayer submits the raw canonical payload observed/generated for the EVM
+LayerZero packet and never reconstructs a typed Soroban enum.
+
+`lz_receive_bytes` runs this sequence:
 
 1. **Authenticate** — `authorize_inbound` requires the configured endpoint's
    authorization and that `origin.sender` equals `Peer(origin.src_eid)`. No byte
@@ -1185,12 +1196,12 @@ interface IPerihelionEscrow {
         uint256 minDestAmount;   // slippage floor on Stellar
         uint256 deadline;        // unix seconds; refundable after
         uint256 nonce;           // intent uniqueness (commits into hash)
-        address preferredSolver; // exclusive solver, or address(0)
+        address preferredSolver; // preferred solver during its reservation window, or address(0)
     }
 
     /// @notice Emitted when a solver locks a user's funds against an intent.
     /// @param intentHash EIP-712 id (I5).
-    /// @param solver     Address that will be repaid on confirmed fill.
+    /// @param solver     Address that is exclusive during the reservation window and is repaid on fill.
     /// @param user       Funds owner.
     /// @param asset      ERC-20 locked.
     /// @param amount     Amount actually received by escrow (post-transfer delta).

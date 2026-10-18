@@ -255,6 +255,7 @@ fn register_intent_with_window(
         min_dest_amount: min,
         deadline,
         preferred_solver: preferred,
+            locked_solver: None,
         reservation_window,
     };
     let origin = Origin {
@@ -470,6 +471,7 @@ fn rejects_message_from_untrusted_peer() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let bad_sender = BytesN::from_array(&s.env, &[0xAB; 32]);
@@ -574,6 +576,7 @@ fn nonce_unbounded_replay_returns_stale_nonce() {
             min_dest_amount: 1,
             deadline: 5_000,
             preferred_solver: None,
+            locked_solver: None,
             reservation_window: 0,
         };
         let origin = Origin {
@@ -637,6 +640,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
             min_dest_amount: 1,
             deadline: 5_000,
             preferred_solver: None,
+            locked_solver: None,
             reservation_window: 0,
         };
         let origin = Origin {
@@ -676,6 +680,7 @@ fn nonce_unbounded_random_permutation_all_consumed_exactly_once() {
             min_dest_amount: 1,
             deadline: 5_000,
             preferred_solver: None,
+            locked_solver: None,
             reservation_window: 0,
         };
         let origin = Origin {
@@ -723,6 +728,7 @@ fn try_deliver_nonce(
         min_dest_amount: 1,
         deadline,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -948,6 +954,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -1581,6 +1588,7 @@ fn registration_rejected_when_no_peer_for_src_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     // Deliver via the registered peer for s.src_eid (transport origin is fine),
@@ -1830,7 +1838,7 @@ fn fill_confirmed_payload_layout() {
     let h = BytesN::from_array(&env, &[1u8; 32]);
     let solver = BytesN::from_array(&env, &[2u8; 32]);
     let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, 1234, 7);
-    assert_eq!(b.len(), 90);
+    assert_eq!(b.len(), FILL_CONFIRMED_LENGTH);
     assert_eq!(b.get(0).unwrap(), PROTOCOL_VERSION);
     assert_eq!(b.get(1).unwrap(), MSG_FILL_CONFIRMED);
 }
@@ -1840,7 +1848,7 @@ fn cancel_intent_payload_layout() {
     let env = Env::default();
     let h = BytesN::from_array(&env, &[9u8; 32]);
     let b = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
-    assert_eq!(b.len(), 35);
+    assert_eq!(b.len(), CANCEL_INTENT_LENGTH);
     assert_eq!(b.get(0).unwrap(), PROTOCOL_VERSION);
     assert_eq!(b.get(1).unwrap(), MSG_CANCEL_INTENT);
     assert_eq!(b.get(34).unwrap(), CANCEL_REASON_EXPIRED);
@@ -1899,7 +1907,10 @@ fn fill_confirmed_matches_golden_vector() {
     }
     let solver = BytesN::from_array(&env, &solver_word);
     let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, 1_000_000, 42);
-    assert_bytes_eq(&b, &decode_vector::<90>(FILL_CONFIRMED_GOLDEN));
+    assert_bytes_eq(
+        &b,
+        &decode_vector::<{ FILL_CONFIRMED_LENGTH as usize }>(FILL_CONFIRMED_GOLDEN),
+    );
 }
 
 #[test]
@@ -1907,7 +1918,10 @@ fn cancel_intent_matches_golden_vector() {
     let env = Env::default();
     let h = BytesN::from_array(&env, &[0x22u8; 32]);
     let b = crate::messages::encode_cancel_intent(&env, &h, CANCEL_REASON_EXPIRED);
-    assert_bytes_eq(&b, &decode_vector::<35>(CANCEL_INTENT_GOLDEN));
+    assert_bytes_eq(
+        &b,
+        &decode_vector::<{ CANCEL_INTENT_LENGTH as usize }>(CANCEL_INTENT_GOLDEN),
+    );
 }
 
 // --- Lifecycle -> wire integration --------------------------------------------
@@ -1931,7 +1945,7 @@ fn fill_dispatches_evm_decodable_confirmation() {
     s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
     let msg = s.mock.last().message;
-    assert_eq!(msg.len(), 90);
+    assert_eq!(msg.len(), FILL_CONFIRMED_LENGTH);
     assert_eq!(msg.get(0).unwrap(), PROTOCOL_VERSION);
     assert_eq!(msg.get(1).unwrap(), MSG_FILL_CONFIRMED);
     let hb = h.to_array();
@@ -1955,7 +1969,7 @@ fn cancel_dispatches_evm_decodable_cancel() {
     s.client.cancel_expired_intent(&caller, &h, &0);
 
     let msg = s.mock.last().message;
-    assert_eq!(msg.len(), 35);
+    assert_eq!(msg.len(), CANCEL_INTENT_LENGTH);
     assert_eq!(msg.get(0).unwrap(), PROTOCOL_VERSION);
     assert_eq!(msg.get(1).unwrap(), MSG_CANCEL_INTENT);
     let hb = h.to_array();
@@ -2205,7 +2219,7 @@ fn amount_boundary_i128_max_wire_encoding() {
     let max: i128 = i128::MAX;
 
     let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, max, 0);
-    assert_eq!(b.len(), 90);
+    assert_eq!(b.len(), FILL_CONFIRMED_LENGTH);
 
     // Decode the 16-byte amount field at offset 66.
     let mut amount_bytes = [0u8; 16];
@@ -2227,7 +2241,7 @@ fn amount_boundary_one_wire_encoding() {
     let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
 
     let b = crate::messages::encode_fill_confirmed(&env, &h, &solver, 1, 0);
-    assert_eq!(b.len(), 90);
+    assert_eq!(b.len(), FILL_CONFIRMED_LENGTH);
 
     let mut amount_bytes = [0u8; 16];
     for i in 0..16u32 {
@@ -2440,6 +2454,7 @@ fn cancel_succeeds_without_native_token_configured() {
         min_dest_amount: 100_000,
         deadline: 5_000,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {

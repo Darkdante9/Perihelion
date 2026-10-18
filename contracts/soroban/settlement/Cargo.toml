@@ -9,6 +9,11 @@ description = "Perihelion Soroban settlement contract — verifies cross-chain i
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The typed adapter is retained only for local test fixtures and explicit
+# migration tooling; production builds use lz_receive_bytes exclusively.
+typed-inbound = []
+
 [dependencies]
 soroban-sdk = { workspace = true }
 # NOTE: constructing an `Address` from raw contract-id bytes (guest/wasm code

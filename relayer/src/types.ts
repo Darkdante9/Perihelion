@@ -7,6 +7,11 @@ import type { Hex } from "@perihelion/sdk";
 /** LayerZero endpoint identifiers for the chains Perihelion bridges. */
 export type EndpointId = number;
 
+/** Canonical Perihelion wire-message widths, shared with the Soroban/EVM codecs. */
+export const FILL_INSTRUCTION_LENGTH = 227;
+export const FILL_CONFIRMED_LENGTH = 90;
+export const CANCEL_INTENT_LENGTH = 35;
+
 /**
  * Discriminated message type carried in every bridge message.
  * Used as part of the composite dedup key so that distinct protocol messages
@@ -41,6 +46,8 @@ export interface BridgeMessage {
   readonly amount: string;
   /** Monotonic per-source-endpoint nonce for ordering and replay protection. */
   readonly nonce: number;
+  /** Exact LayerZero message bytes observed on the source chain. */
+  readonly rawPayload: Hex;
 }
 
 /** A {@link BridgeMessage} observed on-chain, awaiting relay to its destination. */

@@ -110,6 +110,7 @@ fn deliver_fill_instruction(
         min_dest_amount: 100,
         deadline,
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {

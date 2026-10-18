@@ -6,9 +6,10 @@ import { PerihelionEscrow } from "../src/PerihelionEscrow.sol";
 import { PerihelionTimelock } from "../src/PerihelionTimelock.sol";
 import {
     Origin,
-    ILayerZeroEndpoint,
+    ILayerZeroEndpointV2,
     MessagingParams,
-    MessagingFee
+    MessagingFee,
+    MessagingReceipt
 } from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal ERC-20 for fork tests.
@@ -40,13 +41,15 @@ contract ForkERC20 {
 }
 
 /// @dev Mock endpoint for fork tests.
-contract ForkMockEndpoint is ILayerZeroEndpoint {
+contract ForkMockEndpoint is ILayerZeroEndpointV2 {
+    function setDelegate(address) external {}
+
     uint256 public mockFee;
 
     function setMockFee(uint256 fee) external { mockFee = fee; }
 
-    function send(MessagingParams calldata, address) external payable returns (bytes32) {
-        return bytes32(uint256(0xABCD));
+    function send(MessagingParams calldata, address) external payable returns (MessagingReceipt memory receipt) {
+        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {
