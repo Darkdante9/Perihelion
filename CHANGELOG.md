@@ -41,20 +41,18 @@ versioned independently.
 
 ### Fixed
 
-- **EVM escrow:** `PerihelionEscrow` compiles again on solc 0.8.24 without
-  `via_ir`. `lock` is split into `_validateIntent`, `_pullFunds`, `_recordLock`
-  and `_dispatchFillInstruction` to stay under the 16-slot stack limit; check
-  order, effects and the `Locked` event are unchanged. Escrow bytecode pins
-  re-generated (#857).
-- **Toolchain:** Rust pin raised to 1.88.0 so the committed `Cargo.lock`
-  (`darling` 0.23, `serde_with` 3.21) builds. The Soroban workspace now declares
-  `rust-version = "1.88"` with the MSRV-aware resolver 3, `check-toolchain.sh`
-  fails if that drifts from `rust-toolchain.toml`, and the Soroban workflow
-  runs a `--locked` build so a lock update past the pin fails CI (#854).
-- **CI:** `differential-fuzz.yml` reads the Rust toolchain from
-  `rust-toolchain.toml` and verifies it instead of hard-coding 1.81.0 (#855).
-  The `cargo deny` job installs a prebuilt `cargo-deny` 0.20.2 instead of
-  compiling it with the project toolchain, so the policy check runs (#856).
+- The differential-fuzz workflow runs again (#816, #823, #824, #825). It now
+  installs Foundry `stable` (the pinned nightly had been pruned and returned
+  HTTP 404), reads the Soroban SDK major version correctly (the greedy `sed`
+  always yielded an empty string), and takes its Rust toolchain from
+  `rust-toolchain.toml`. `contracts/soroban/Cargo.lock` pins `serde_with` 3.17
+  and `darling` 0.21, the newest releases that build on the pinned Rust 1.85
+  (3.21 / 0.23 need 1.88). The EVM test suite compiles again: the
+  `WireFormat.t.sol` tests truncated by #706 are restored with the 227-byte
+  FillInstruction vector lengths, and `Fork.t.sol`, `PerihelionTimelock.t.sol`,
+  `PerihelionEscrow.t.sol` and `Fuzz.t.sol` no longer use an invalid hex
+  literal, non-ASCII string literals or 7-field `locks()` destructures for the
+  8-field `Lock` struct.
 - The Soroban settlement contract's inbound-nonce storage no longer grows
   without bound: a per-eid low-water mark (`InboundNonceFloor`) plus the new
   permissionless `prune_nonce_words(eid)` entrypoint reclaims the rent of
@@ -64,6 +62,15 @@ versioned independently.
 - The Soroban settlement crate compiles again: over-long `symbol_short!`
   event topics and test-only compile errors that had been hidden behind the
   `messages.rs` parse error are fixed (#678, #679).
+- The Soroban settlement crate builds again: `MIN_MAX_TTL` and
+  `MAX_TTL_CEILING`, the `set_max_ttl` bounds documented by #719, are declared
+  again after being lost in a merge (#852). The test suite compiles against the
+  three-argument `propose_peer(eid, peer, &delay)`; tests that only need a
+  configured peer now share one `register_peer` helper (#853).
+- The differential-fuzz workflow runs again: Foundry is installed from
+  `stable` instead of a pruned nightly pin that returned HTTP 404, and the
+  Soroban SDK/CLI major-version check no longer reads an empty SDK major
+  (#835, #826).
 
 ### Changed
 
