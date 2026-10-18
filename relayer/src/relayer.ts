@@ -101,7 +101,21 @@ export interface Logger {
   error(msg: string, meta?: Record<string, unknown>): void;
 }
 
-/** Retry + dead-letter configuration. */
+/**
+ * Retry + dead-letter configuration.
+ *
+ * ## Retry-budget semantics
+ *
+ * Attempt bookkeeping is keyed on the message's composite key and is
+ * **reset whenever the message is no longer observed** by the watcher (e.g.
+ * it disappears from the source chain for a while and later reappears).  A
+ * message that is re-polled after a prolonged absence therefore starts with a
+ * fresh retry budget rather than inheriting the attempt count from its
+ * previous incarnation.  This is deliberate: a message that vanished and came
+ * back is treated as a new observation, and the dead-letter budget is meant to
+ * bound *consecutive* failures of a continuously-observed message, not to
+ * accumulate across unrelated appearances.
+ */
 export interface RetryPolicy {
   /** Maximum delivery attempts before dead-lettering. Default: 5. */
   maxAttempts: number;
@@ -322,22 +336,13 @@ export class Relayer {
           this.cursor = Math.max(this.startBlock, head - reorgDepth);
           this.readiness.cursor = this.cursor;
 
-          if (blockHeaders) {
-            for (const block of blockHeaders) {
-              this.recordBlock(block);
-            }
-          }
-          this.recordBlock({ number: head, hash: headHash, parentHash });
+          this.recordHeaders(blockHeaders, head, headHash, parentHash);
           return [];
         }
       }
-      // Record intermediate block headers if provided.
-      if (blockHeaders) {
-        for (const block of blockHeaders) {
-          this.recordBlock(block);
-        }
-      }
-      this.recordBlock({ number: head, hash: headHash, parentHash });
+      // Record every header the watcher returned — on the non-reorg path too —
+      // so that the next tick's detectReorg has the parent hash it needs.
+      this.recordHeaders(blockHeaders, head, headHash, parentHash);
     }
 
     const confirmedHead = Math.max(0, head - this.config.confirmations);
@@ -347,6 +352,20 @@ export class Relayer {
     this.readiness.head = head;
     this.readiness.confirmedHead = confirmedHead;
     this.readiness.lag = Math.max(0, confirmedHead + 1 - this.cursor);
+
+    // Drop retry bookkeeping for messages that are no longer observed, so a
+    // message that disappears and later reappears starts with a fresh retry
+    // budget (see RetryPolicy docs).
+    const observedKeys = new Set<string>();
+    for (const pending of messages) {
+      const { srcEid, dstEid, intentHash, messageType, nonce } = pending.message;
+      observedKeys.add(messageKeyString({ srcEid, dstEid, intentHash, messageType, nonce }));
+    }
+    for (const keyStr of this.attempts.keys()) {
+      if (!observedKeys.has(keyStr)) {
+        this.attempts.delete(keyStr);
+      }
+    }
 
     for (const pending of messages) {
       if (pending.srcBlock > confirmedHead) continue; // not yet final
@@ -554,9 +573,35 @@ export class Relayer {
     return depth;
   }
 
+  /**
+   * Record all headers returned by the watcher for this tick: the optional
+   * intermediate `blockHeaders` plus the head itself.  Called on both the
+   * reorg and non-reorg paths so reorg detection always has the parent hash
+   * it needs on the following tick.
+   */
+  private recordHeaders(
+    blockHeaders: Array<{ number: number; hash: string; parentHash: string }> | undefined,
+    head: number,
+    headHash: string,
+    parentHash: string,
+  ): void {
+    if (blockHeaders) {
+      for (const block of blockHeaders) {
+        this.recordBlock(block);
+      }
+    }
+    this.recordBlock({ number: head, hash: headHash, parentHash });
+  }
+
   private recordBlock(block: BlockRecord): void {
     // Keep window bounded to confirmations + a small buffer.
     const limit = Math.max(this.config.confirmations + 10, 20);
+    // Replace any existing record for the same height (a reorg may re-report
+    // a block number with a new hash) so lookups always see the latest view.
+    const existing = this.blockWindow.findIndex((b) => b.number === block.number);
+    if (existing !== -1) {
+      this.blockWindow.splice(existing, 1);
+    }
     this.blockWindow.push(block);
     if (this.blockWindow.length > limit) {
       this.blockWindow.shift();

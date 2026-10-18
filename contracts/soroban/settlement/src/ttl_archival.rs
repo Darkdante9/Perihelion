@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#![cfg(test)]
-
 //! TTL Archival Boundary Tests
 //!
 //! Tests that simulate entry archival at the TTL boundary and verify the contract's
@@ -530,4 +528,3 @@ fn inbound_nonce_archival_resets_replay_protection() {
     // Should fail with StaleNonce if nonce state is intact
     assert!(result.is_err(), "nonce replay should be rejected");
 }
-

@@ -72,7 +72,7 @@ fn setup() -> Setup {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
+    client.propose_peer(&src_eid, &peer, &MIN_PEER_CHANGE_DELAY);
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
@@ -288,7 +288,7 @@ fn cancel_ignored_topic() {
 fn peer_change_proposed_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     assert_event_shape(&s.env, "peer_change_proposed", 1);
 }
 
@@ -296,7 +296,7 @@ fn peer_change_proposed_topic() {
 fn peer_change_cancelled_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     s.client.cancel_pending_peer(&s.src_eid);
     assert_event_shape(&s.env, "peer_change_cancelled", 1);
 }

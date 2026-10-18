@@ -161,7 +161,7 @@ contract WireFormatConformanceTest is Test {
     /// a decode error in an unrelated test.
     function test_FillInstructionVectorLength() public view {
         bytes memory golden = _readVector("fill_instruction.hex");
-        assertEq(golden.length, FILL_INSTRUCTION_LENGTH, "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes");
+        assertEq(golden.length, harness.fillInstructionLength(), "fill_instruction.hex must be exactly FILL_INSTRUCTION_LENGTH bytes");
         assertEq(golden.length, 227, "fill_instruction.hex must be exactly 227 bytes");
     }
 
@@ -183,5 +183,142 @@ contract WireFormatConformanceTest is Test {
     // --- FillConfirmed negatives ---
 
     function test_FillConfirmedRejectsShortPayload() public {
+        bytes memory bad = _readNeg("fill_confirmed_short.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
 
-/* … truncated 7758 chars — edit only what you need near the top … */
+    function test_FillConfirmedRejectsLongPayload() public {
+        bytes memory bad = _readNeg("fill_confirmed_long.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
+
+    function test_FillConfirmedRejectsBadType() public {
+        bytes memory bad = _readNeg("fill_confirmed_bad_type.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_FillConfirmedRejectsBadVersion() public {
+        bytes memory bad = _readNeg("fill_confirmed_bad_version.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_FillConfirmedRejectsNonzeroHigh() public {
+        bytes memory bad = _readNeg("fill_confirmed_nonzero_high.hex");
+        vm.expectRevert();
+        harness.decodeFillConfirmed(bad);
+    }
+
+    // --- CancelIntent negatives ---
+
+    function test_CancelIntentRejectsShortPayload() public {
+        bytes memory bad = _readNeg("cancel_intent_short.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+
+    function test_CancelIntentRejectsLongPayload() public {
+        bytes memory bad = _readNeg("cancel_intent_long.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+
+    function test_CancelIntentRejectsBadType() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_type.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_CancelIntentRejectsBadVersion() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_version.hex");
+        vm.expectRevert();
+        harness.routeInbound(bad);
+    }
+
+    function test_CancelIntentRejectsBadReason() public {
+        bytes memory bad = _readNeg("cancel_intent_bad_reason.hex");
+        vm.expectRevert();
+        harness.decodeCancelIntent(bad);
+    }
+}
+
+/// @dev Tests for issue #270: destAsset must survive the full 69-byte round-trip.
+contract FillInstructionEncodeTest is Test {
+    DecoderHarness internal harness;
+
+    uint32 internal constant STELLAR_EID = 30_316;
+
+    function setUp() public {
+        harness = new DecoderHarness(address(0x1), STELLAR_EID);
+    }
+
+    function _baseIntent() internal view returns (PerihelionEscrow.Intent memory) {
+        return PerihelionEscrow.Intent({
+            user: address(0xA1),
+            destination: "GUSERSTELLARADDRESSFIXEDLENGTH56CHARS123", // will be padded
+            sourceChainId: block.chainid,
+            sourceAsset: address(0xA2),
+            sourceAmount: 1_000_000,
+            destAsset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV",
+            minDestAmount: 990_000,
+            deadline: 9_999_999,
+            nonce: 1,
+            preferredSolver: address(0)
+        });
+    }
+
+    /// Encoded payload is exactly 227 bytes (expanded from the old 158 and including reservation_window).
+    function test_EncodedPayloadIs227Bytes() public view {
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        assertEq(encoded.length, 227);
+    }
+
+    /// The full 69-byte destAsset appears at offset 94 in the payload.
+    function test_DestAsset69BytesPreserved() public view {
+        // Use a CODE:ISSUER asset whose issuer is 56 chars (total 69 bytes with CODE: prefix).
+        string memory fullAsset = "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVV";
+        assertEq(bytes(fullAsset).length, 61); // "USDC:" (5) + 56 char issuer
+
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        intent.destAsset = fullAsset;
+
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        assertEq(encoded.length, 227);
+
+        // Slice out the 69-byte dest_asset field at offset 94.
+        bytes memory destField = new bytes(69);
+        for (uint256 i = 0; i < 69; i++) {
+            destField[i] = encoded[94 + i];
+        }
+
+        // First 61 bytes should be the asset string; remaining 8 should be zero-padded.
+        bytes memory expected = new bytes(69);
+        bytes memory assetBytes = bytes(fullAsset);
+        for (uint256 i = 0; i < assetBytes.length; i++) {
+            expected[i] = assetBytes[i];
+        }
+        assertEq(destField, expected);
+    }
+
+    /// recipient field (56 bytes) starts at offset 38.
+    function test_RecipientFieldIs56Bytes() public view {
+        // A Stellar strkey is exactly 56 chars; trim/pad to 56 for test.
+        PerihelionEscrow.Intent memory intent = _baseIntent();
+        intent.destination = "GBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 58 chars, will be clamped to 56
+        bytes memory encoded = harness.encodeFillInstruction(bytes32(uint256(1)), intent);
+        // Confirm recipient field occupies bytes [38, 94).
+        assertEq(encoded.length, 227);
+        // Byte at offset 94 is the start of dest_asset, not recipient overflow.
+        // Verify by checking that the min_dest_amount field lands at offset 163.
+        // min_dest_amount = 990_000 encoded as uint128 big-endian.
+        uint128 minAmt = uint128(intent.minDestAmount);
+        bytes memory amtBytes = abi.encodePacked(minAmt);
+        for (uint256 i = 0; i < 16; i++) {
+            assertEq(encoded[163 + i], amtBytes[i]);
+        }
+    }
+}

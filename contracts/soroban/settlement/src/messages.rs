@@ -212,7 +212,7 @@ pub fn decode_message(
             };
             Ok((msg_type, dummy, Some(ci)))
         }
-        _ => Err(PerihelionError::MalformedPayload),
+        _ => Err(PerihelionError::UnknownMessageType),
     }
 }
 

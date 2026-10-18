@@ -242,7 +242,7 @@ test("buildIntent warns for a 6-decimal (USDC) amount just below the default V_m
         sourceAmount: "9999999", // $9.999999 at 6dp — just under the $10 default V_min
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "9000000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { sourceDecimals: 6 }
     );
@@ -270,7 +270,7 @@ test("buildIntent warns for the economically-equivalent 18-decimal (WETH) amount
         sourceAmount: "9999999000000000000",
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "9000000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { sourceDecimals: 18 }
     );
@@ -299,7 +299,7 @@ test("buildIntent does not warn at the exact V_min boundary for an 18-decimal as
         sourceAmount: "10000000000000000000",
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "9000000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { sourceDecimals: 18 }
     );
@@ -324,7 +324,7 @@ test("buildIntent does not warn for an 18-decimal amount comfortably above V_min
         sourceAmount: "1000000000000000000000", // 1000 token-units @ 18dp — normalizes to $1000
         destAsset: VALID_DEST_ASSET,
         minDestAmount: "900000",
-        deadline: 4102444800,
+        deadline: FUTURE_DEADLINE,
       },
       { sourceDecimals: 18 }
     );
@@ -355,7 +355,7 @@ test("validateIntent rejects a destination with an invalid CRC-16 checksum", () 
       sourceAmount: "1000000",
       destAsset: VALID_DEST_ASSET,
       minDestAmount: "900000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.fail("expected validateIntent to throw for a bad destination checksum");
   } catch (err) {
@@ -378,7 +378,7 @@ test("validateIntent rejects a destAsset whose issuer has an invalid CRC-16 chec
       sourceAmount: "1000000",
       destAsset: `USDC:${badChecksumIssuer}`,
       minDestAmount: "900000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.fail("expected validateIntent to throw for a bad destAsset issuer checksum");
   } catch (err) {
@@ -401,7 +401,7 @@ test("buildIntent rejects a destination with an invalid checksum via validateInt
       sourceAmount: "1000000",
       destAsset: VALID_DEST_ASSET,
       minDestAmount: "900000",
-      deadline: 4102444800,
+      deadline: FUTURE_DEADLINE,
     });
     assert.fail("expected buildIntent to throw for a bad destination checksum");
   } catch (err) {

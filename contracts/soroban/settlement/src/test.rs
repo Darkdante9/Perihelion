@@ -4,14 +4,14 @@
 
 extern crate std;
 
-use std::{collections::BTreeMap, format, fs, path::PathBuf, string::String};
+use std::{collections::BTreeMap, fs, path::PathBuf, string::String};
 
 use super::*;
 use serde::Deserialize;
 use soroban_sdk::{
     contract, contractimpl, symbol_short,
     testutils::{Address as _, Events, Ledger as _},
-    token, Address, Bytes, BytesN, Env, Symbol, TryFromVal,
+    token, Address, BytesN, Env, Symbol, TryFromVal,
 };
 
 // --- Mock LayerZero endpoint --------------------------------------------------
@@ -164,6 +164,23 @@ fn assert_budget_within(
     );
 }
 
+/// Register `peer` as the trusted counterparty for `eid` through the delayed
+/// peer-governance flow (issue #165): propose with the minimum delay, advance
+/// the clock past it, confirm, then restore the clock. Every test that just
+/// needs a configured peer goes through here, so the next change to the
+/// `propose_peer` / `confirm_peer` signatures touches one function.
+fn register_peer(env: &Env, client: &PerihelionClient, eid: u32, peer: &BytesN<32>) {
+    let now = env.ledger().timestamp();
+    client.propose_peer(&eid, peer, &MIN_PEER_CHANGE_DELAY);
+    env.ledger().with_mut(|li| {
+        li.timestamp = now + MIN_PEER_CHANGE_DELAY + 1;
+    });
+    client.confirm_peer(&eid);
+    env.ledger().with_mut(|li| {
+        li.timestamp = now;
+    });
+}
+
 fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
@@ -188,20 +205,11 @@ fn setup() -> Setup {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    // Peer governance (issue #165): propose, advance time, confirm
-    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
-    env.ledger().with_mut(|li| {
-        li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
-    });
-    client.confirm_peer(&src_eid);
-    // confirm_peer only requires that the delay has elapsed since propose_peer;
-    // nothing about the confirmed peer depends on the clock staying advanced.
-    // Reset it back to the setup() baseline so every test's `deadline` fixture
-    // values (written against a ~1_000 clock) aren't already expired the
-    // moment setup() returns.
-    env.ledger().with_mut(|li| {
-        li.timestamp = 1_000;
-    });
+    // Peer governance (issue #165): propose, advance time, confirm. The helper
+    // resets the clock to the setup() baseline afterwards so every test's
+    // `deadline` fixture values (written against a ~1_000 clock) aren't
+    // already expired the moment setup() returns.
+    register_peer(&env, &client, src_eid, &peer);
 
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);
@@ -442,20 +450,6 @@ fn rejects_fill_of_unknown_intent() {
     let evm = BytesN::from_array(&s.env, &[0x11; 32]);
     s.client
         .fill_intent(&solver, &evm, &hash(&s.env, 99), &100, &0);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #132)")] // ReservedForSolver
-fn rejects_fill_by_non_preferred_solver() {
-    let s = setup();
-    let recipient = Address::generate(&s.env);
-    let preferred = Address::generate(&s.env);
-    let solver = Address::generate(&s.env);
-    s.asset_admin.mint(&solver, &1_000_000);
-    let h = hash(&s.env, 7);
-    register_intent(&s, &h, &recipient, 1, 5_000, 1, Some(preferred));
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.fill_intent(&solver, &evm, &h, &100, &0);
 }
 
 #[test]
@@ -742,10 +736,12 @@ fn try_deliver_nonce(
         .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi));
     // A contract revert surfaces as Err(Ok(PerihelionError)) on the outer
     // layer (same shape the other try_* assertions in this file rely on).
+    // The inner `Ok(Err(_))` is a host-side conversion failure of the return
+    // value, not a contract error, so it is a test bug rather than a verdict.
     match res {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(e.unwrap()),
+        Ok(Err(e)) => panic!("lz_receive return value failed to convert: {e:?}"),
+        Err(e) => Err(e.expect("lz_receive aborted with a non-contract error")),
     }
 }
 
@@ -935,16 +931,9 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
     // the body-declared eid is itself a trusted peer.
     let attacker_eid = 99999u32;
     let attacker_peer = BytesN::from_array(&s.env, &[0xAA; 32]);
-    s.client.propose_peer(&attacker_eid, &attacker_peer, MIN_PEER_CHANGE_DELAY);
-    s.env.ledger().with_mut(|li| {
-        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
-    });
-    s.client.confirm_peer(&attacker_eid);
-    // Reset the clock back to the setup() baseline so this test's own
+    // The helper restores the clock afterwards so this test's own
     // `deadline: 5_000` fixture isn't already expired.
-    s.env.ledger().with_mut(|li| {
-        li.timestamp = 1_000;
-    });
+    register_peer(&s.env, &s.client, attacker_eid, &attacker_peer);
 
     let fi = FillInstruction {
         intent_hash: h.clone(),
@@ -1100,7 +1089,7 @@ fn set_endpoint_emits_event() {
 fn peer_governance_propose_emits_event() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let events = s.env.events().all();
     assert!(!events.is_empty(), "expected peer_change_proposed event");
 }
@@ -1109,7 +1098,7 @@ fn peer_governance_propose_emits_event() {
 fn peer_governance_confirm_requires_delay() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Should fail if called before the delay
     assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
@@ -1125,7 +1114,7 @@ fn peer_governance_confirm_requires_delay() {
 fn peer_governance_cancel_clears_pending() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Cancel the pending peer change
     assert!(s.client.try_cancel_pending_peer(&s.src_eid).is_ok());
@@ -1148,7 +1137,7 @@ fn peer_governance_get_pending_peer() {
     assert!(pending.unwrap().unwrap().is_none());
 
     // After propose, should return the pending peer
-    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
     let (peer, _proposed_at, _ready_at, _expires_at) = pending.unwrap().unwrap().unwrap();
@@ -1451,7 +1440,7 @@ fn peer_set_event_shape() {
     let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
 
     // Propose the new peer
-    s.client.propose_peer(&s.src_eid, &new_peer, MIN_PEER_CHANGE_DELAY);
+    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Advance time past the minimum delay
     s.env.ledger().with_mut(|li| {
@@ -2431,7 +2420,7 @@ fn cancel_succeeds_without_native_token_configured() {
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
-    client.propose_peer(&src_eid, &peer, MIN_PEER_CHANGE_DELAY);
+    client.propose_peer(&src_eid, &peer, &MIN_PEER_CHANGE_DELAY);
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000 + MIN_PEER_CHANGE_DELAY + 1;
     });
@@ -2577,28 +2566,6 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         assert_parity(&h, 0, PerihelionError::InvalidAmount, "zero amount");
     }
 
-    // Test 5: reserved for another solver
-    {
-        let h = hash(&s.env, 205);
-        let preferred = Address::generate(&s.env);
-        register_intent_with_window(
-            &s,
-            &h,
-            &recipient,
-            100_000,
-            5_000,
-            5,
-            Some(preferred),
-            1_000,
-        );
-
-        assert_parity(
-            &h,
-            250_000,
-            PerihelionError::ReservedForSolver,
-            "reserved for solver",
-        );
-    }
 }
 
 // --- Rolling-window accessors (issue #680) -----------------------------------

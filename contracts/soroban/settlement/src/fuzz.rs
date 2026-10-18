@@ -384,10 +384,32 @@ proptest! {
 // Corpus export for cross-language validation
 // -------------------------------------------------------------------------
 
-/// Export a payload to the shared fuzz corpus directory for Solidity to consume.
+/// Resolve the directory where generated corpus files are written.
+///
+/// Generated payloads are *not* written into the tracked
+/// `contracts/shared/wire-vectors/fuzz-corpus/` directory (that directory holds
+/// hand-curated regression inputs and is read-only for tests). Instead they go
+/// to an ignored location:
+///
+/// 1. `$PERIHELION_FUZZ_CORPUS_DIR` if set (used by the CI cross-validation job
+///    to point at a directory it can upload as an artifact), otherwise
+/// 2. `target/fuzz-corpus/` under the Cargo target directory.
+fn corpus_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("PERIHELION_FUZZ_CORPUS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    // `CARGO_TARGET_DIR` is honoured by Cargo; fall back to the conventional
+    // `target/` directory next to the workspace root.
+    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target"),
+    };
+    target_dir.join("fuzz-corpus")
+}
+
+/// Export a payload to the generated fuzz corpus directory for Solidity to consume.
 fn export_to_corpus(name: &str, payload: &Bytes) {
-    let corpus_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors/fuzz-corpus");
+    let corpus_dir = corpus_dir();
     fs::create_dir_all(&corpus_dir).expect("Failed to create corpus dir");
 
     let mut hex = String::with_capacity(payload.len() as usize * 2 + 2);
@@ -411,11 +433,16 @@ mod tests {
         let solver = BytesN::from_array(&env, &[0xAAu8; 32]);
         let encoded = encode_fill_confirmed(&env, &hash, &solver, 1_000_000, 42);
         export_to_corpus("test_export", &encoded);
-        // Verify file exists
-        let corpus_dir =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors/fuzz-corpus");
-        let file_path = corpus_dir.join("test_export.hex");
+        // Verify file exists in the generated (ignored) corpus directory, not
+        // in the tracked `contracts/shared/wire-vectors/fuzz-corpus/` directory.
+        let file_path = corpus_dir().join("test_export.hex");
         assert!(file_path.exists(), "Corpus file should exist");
+        assert!(
+            !file_path.starts_with(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shared/wire-vectors")
+            ),
+            "generated corpus must not be written into the tracked wire-vectors directory"
+        );
     }
 
     /// Regression: the 226-byte FillInstruction negative vector must be rejected

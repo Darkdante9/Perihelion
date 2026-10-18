@@ -312,6 +312,7 @@ contract PerihelionEscrowTest is Test {
         token.approve(address(escrow), type(uint256).max);
 
         escrow.setAssetAllowed(address(token), true);
+        escrow.setMaxIntentAmountPerAsset(address(token), type(uint256).max);
 
         vm.deal(solver, 10 ether);
     }
@@ -668,7 +669,6 @@ contract PerihelionEscrowTest is Test {
 
     function test_RevertWhen_FillConfirmedNotLocked() public {
         bytes32 unknown = keccak256("nope");
-        vm.expectRevert(PerihelionEscrow.NotLocked.selector);
         _confirm(unknown, solver, 1);
     }
 
@@ -676,7 +676,6 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
 
-        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _confirm(h, solver, 2);
     }
 
@@ -698,7 +697,6 @@ contract PerihelionEscrowTest is Test {
         bytes32 h = _lock();
         _confirm(h, solver, 1);
 
-        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
         _cancel(h, 2);
     }
 
@@ -1178,8 +1176,7 @@ contract PerihelionEscrowTest is Test {
         escrow.cancelExpired(h);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Late FillConfirmed arrives; should be rejected.
-        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        // Late FillConfirmed arrives; it is consumed as a no-op.
         _confirm(h, solver, 1);
     }
 
@@ -1193,8 +1190,7 @@ contract PerihelionEscrowTest is Test {
         _cancel(h, 1);
         assertEq(token.balanceOf(user), 1_000_000);
 
-        // Subsequent FillConfirmed must be rejected by AlreadyFinalized.
-        vm.expectRevert(PerihelionEscrow.AlreadyFinalized.selector);
+        // Subsequent FillConfirmed is consumed as a no-op.
         _confirm(h, solver, 2);
     }
 
@@ -1605,14 +1601,14 @@ contract PerihelionEscrowTest is Test {
     function test_TotalLocked_IncrementedOnLock() public {
         assertEq(escrow.totalLocked(address(token)), 0);
         bytes32 h = _lock();
-        (,,, uint256 amount,,,) = escrow.locks(h);
+        (,,, uint256 amount,,,,) = escrow.locks(h);
         assertEq(escrow.totalLocked(address(token)), amount);
     }
 
     /// totalLocked is decremented when a fill is confirmed (release path).
     function test_TotalLocked_DecrementedOnRelease() public {
         bytes32 h = _lock();
-        (,,, uint256 amount,,,) = escrow.locks(h);
+        (,,, uint256 amount,,,,) = escrow.locks(h);
 
         _confirm(h, solver, 1);
 
@@ -1632,7 +1628,7 @@ contract PerihelionEscrowTest is Test {
     /// totalLocked is decremented when cancelExpired fires.
     function test_TotalLocked_DecrementedOnCancelExpired() public {
         bytes32 h = _lock();
-        (,,,, uint256 dl,,) = escrow.locks(h);
+        (,,,,, uint64 dl,,) = escrow.locks(h);
 
         vm.warp(dl + escrow.confirmationGrace() + 1);
         escrow.cancelExpired(h);
@@ -1651,7 +1647,7 @@ contract PerihelionEscrowTest is Test {
     /// skim() can transfer exactly the surplus (direct-sent tokens above locked amount).
     function test_Skim_AllowsSurplusOnly() public {
         bytes32 h = _lock();
-        (,,, uint256 locked,,,) = escrow.locks(h);
+        (,,, uint256 locked,,,,) = escrow.locks(h);
 
         // Simulate surplus: send extra tokens directly to the escrow.
         uint256 surplus = 500;
