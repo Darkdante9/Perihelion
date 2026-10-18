@@ -41,6 +41,7 @@ documented name:
 | `KEEPER_REWARD_SKIPPED`        | `reward_sk`    | `keeper_reward_skipped`        |
 | `CONFIRMATION_SENT`            | `confirmed`    | `confirmation_sent`            |
 | `CANCELLED_INBOUND`            | `canl_in`      | `cancelled_inbound`            |
+| `CANCELLED_BEFORE_REGISTRATION`| `cancelled_before_registration`¹ | `cancelled_before_registration` |
 | `CANCEL_IGNORED`               | `canl_ign`     | `cancel_ignored`               |
 | `PEER_CHANGE_PROPOSED`         | `peer_prop`    | `peer_change_proposed`         |
 | `ENDPOINT_CHANGE_PROPOSED`     | `endp_prop`    | `endpoint_change_proposed`     |

@@ -260,6 +260,17 @@ fn cancelled_inbound_topic() {
 }
 
 #[test]
+fn cancelled_before_registration_topic() {
+    let s = setup();
+    let h = hash(&s.env, 5);
+
+    // The cancel overtakes its FillInstruction: no record exists yet.
+    deliver_cancel(&s, &h, 1);
+
+    assert_event_shape(&s.env, "cancelled_before_registration", 2);
+}
+
+#[test]
 fn cancel_ignored_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);

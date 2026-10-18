@@ -400,6 +400,51 @@ fn cancel_after_deadline_notifies_source() {
     );
 }
 
+/// Issue 915: inbound delivery is unordered, so a CancelIntent can overtake the
+/// FillInstruction it refers to. The late registration must be ignored, so an
+/// intent the source chain already cancelled can never be filled.
+#[test]
+fn cancel_before_fill_instruction_blocks_late_registration() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 0xC1);
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    // The FillInstruction arrives afterwards on a later nonce.
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 2, None);
+
+    assert!(
+        s.client.get_intent(&h).is_none(),
+        "late FillInstruction must not register a cancelled intent"
+    );
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Cancelled));
+
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    let fill = s
+        .client
+        .try_deliver_intent(&solver, &solver_evm, &h, &100_000);
+    assert!(fill.is_err(), "a cancelled intent must not be fillable");
+    assert_eq!(
+        token::TokenClient::new(&s.env, &s.asset).balance(&recipient),
+        0,
+        "no destination asset may move for a cancelled intent"
+    );
+}
+
 // --- Invariant guards ---------------------------------------------------------
 
 #[test]

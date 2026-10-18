@@ -93,6 +93,7 @@ mod events {
         registered,
         confirmation_sent,
         cancelled_inbound,
+        cancelled_before_registration,
         cancel_ignored,
         nonce_words_pruned,
     );
@@ -142,6 +143,7 @@ mod events {
 // | `confirmation_sent`            | ("confirmation_sent", intent_hash)     | (solver: Address)
 // | `cancelled`                    | ("cancelled", intent_hash)             | (src_eid: u32, deadline: u64)
 // | `cancelled_inbound`            | ("cancelled_inbound", intent_hash)     | (src_eid: u32)
+// | `cancelled_before_registration`| ("cancelled_before_registration", intent_hash) | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
 // | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
 
@@ -1802,7 +1804,7 @@ impl Perihelion {
                 // CancelIntent is an exit path — it unwinds existing intents and
                 // remains available even during pause to prevent fund stranding.
                 Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
-                Self::on_cancel_inbound(env, ci)
+                Self::on_cancel_inbound(env, origin.src_eid, ci)
             }
         }
     }
@@ -2083,7 +2085,11 @@ impl Perihelion {
         Ok(())
     }
 
-    fn on_cancel_inbound(env: &Env, ci: CancelInstruction) -> Result<(), PerihelionError> {
+    fn on_cancel_inbound(
+        env: &Env,
+        src_eid: u32,
+        ci: CancelInstruction,
+    ) -> Result<(), PerihelionError> {
         if Self::is_finalized(env, &ci.intent_hash) {
             // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
             // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
@@ -2103,34 +2109,55 @@ impl Perihelion {
             return Ok(());
         }
         let key = DataKey::Intent(ci.intent_hash.clone());
-        if let Some(mut rec) = env
+        let Some(mut rec) = env
             .storage()
             .persistent()
             .get::<DataKey, IntentRecord>(&key)
-        {
-            if rec.status == IntentStatus::Locked {
-                rec.status = IntentStatus::Cancelled;
-                env.storage().persistent().set(&key, &rec);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
-                env.storage().persistent().extend_ttl(
-                    &DataKey::Cancelled(ci.intent_hash.clone()),
-                    MAX_TTL / 2,
-                    MAX_TTL,
-                );
-                env.events().publish(
-                    (events::cancelled_inbound(env), ci.intent_hash.clone()),
-                    (rec.src_eid,),
-                );
-            } else {
-                // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
-                // Emit cancel_ignored event to record the race.
-                env.events().publish(
-                    (events::cancel_ignored(env), ci.intent_hash.clone()),
-                    (rec.status as u32,),
-                );
-            }
+        else {
+            // Inbound delivery is unordered, so this cancel can overtake the
+            // FillInstruction it refers to. Tombstone the intent as Cancelled so
+            // the late registration in on_fill_instruction sees it as finalized
+            // and is ignored. Without this marker the intent could still be filled
+            // after the source chain had already cancelled it.
+            env.storage()
+                .persistent()
+                .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Cancelled(ci.intent_hash.clone()),
+                MAX_TTL / 2,
+                MAX_TTL,
+            );
+            env.events().publish(
+                (
+                    events::cancelled_before_registration(env),
+                    ci.intent_hash.clone(),
+                ),
+                (src_eid,),
+            );
+            return Ok(());
+        };
+        if rec.status == IntentStatus::Locked {
+            rec.status = IntentStatus::Cancelled;
+            env.storage().persistent().set(&key, &rec);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Cancelled(ci.intent_hash.clone()),
+                MAX_TTL / 2,
+                MAX_TTL,
+            );
+            env.events().publish(
+                (events::cancelled_inbound(env), ci.intent_hash.clone()),
+                (rec.src_eid,),
+            );
+        } else {
+            // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
+            // Emit cancel_ignored event to record the race.
+            env.events().publish(
+                (events::cancel_ignored(env), ci.intent_hash.clone()),
+                (rec.status as u32,),
+            );
         }
         Ok(())
     }
