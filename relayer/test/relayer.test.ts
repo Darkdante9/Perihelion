@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { Relayer, FatalError } from "../src/relayer.js";
 import { InMemoryDeadLetterStore } from "../src/dead-letter.js";
 import { messageKeyString } from "../src/types.js";
+import { validConfigEnv, VALID_ESCROW, VALID_CONTRACT } from "./fixtures.js";
 import type {
   DestinationDelivery,
   Logger,
@@ -26,9 +27,6 @@ function memCheckpoint(): CheckpointStore {
 }
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
-
-const VALID_ESCROW = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
-const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4";
 
 function makeMsg(
   block: number,
@@ -53,16 +51,7 @@ function makeMsg(
 }
 
 function baseConfig() {
-  return loadConfig({
-    PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
-    PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
-    PERIHELION_EVM_RPC_URL: "http://localhost:8545",
-    PERIHELION_STELLAR_RPC_URL: "https://soroban-testnet.stellar.org",
-    PERIHELION_SOURCE_EID: "30101",
-    PERIHELION_STELLAR_EID: "40161",
-    STELLAR_NETWORK: "Test SDF Network ; September 2015",
-    SIGNER_SECRET: "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU",
-  });
+  return loadConfig(validConfigEnv());
 }
 
 // ─── Issue 1: Config validation ─────────────────────────────────────────────
