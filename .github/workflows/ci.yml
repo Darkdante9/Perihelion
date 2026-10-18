@@ -2,11 +2,19 @@ name: CI
 
 # Triggering matrix
 # ─────────────────────────────────────────────────────────
-# Workflow     | Paths                                         | Purpose
+# Every workflow below runs on every PR to main; path filtering
+# happens INSIDE each workflow (a `changes` job using
+# dorny/paths-filter) so the required gate job always reports a
+# conclusion. Workflow-level `on.*.paths` filters are avoided
+# because a filtered-out PR never creates a run, leaving required
+# checks stuck in "Expected — Waiting for status to be reported".
+#
+# Workflow     | Internal filter (paths)                       | Purpose
 # ─────────────|───────────────────────────────────────────────|────────────────────
 # ci.yml       | sdk/, relayer/, solver/, mempool/,            | TypeScript build,
 #              | package.json, package-lock.json, .nvmrc,       | test, and lint
-#              | tsconfig.base.json, .github/workflows/ci.yml   |
+#              | tsconfig.base.json, .github/workflows/ci.yml,  |
+#              | scripts/check-spdx-headers.sh, docs/**, *.md   |
 # evm.yml      | contracts/evm/**                               | Solidity build,
 #              | .github/workflows/evm.yml                      | test, and Slither
 # soroban.yml  | contracts/soroban/**                           | Rust build, test,
@@ -170,27 +178,27 @@ jobs:
       - name: Run end-to-end tests
         run: make test-e2e
 
-  # Required gate for branch protection.
+  # Required gate for branch protection: `CI / required`.
   #
-  # This job is the ONLY check registered in GitHub's required-status-checks.
-  # It deliberately gates on `typescript` and `e2e` so a build failure is always
-  # visible to branch protection, while still passing green when the path filter
-  # skips those jobs entirely (e.g. a docs-only PR that doesn't touch sdk/**).
+  # This job is the ONLY check from this workflow registered in GitHub's
+  # required-status-checks. It gates on `typescript` and `e2e` so a build
+  # failure is always visible to branch protection, while still passing green
+  # when the internal `changes` filter skips those jobs (e.g. a docs-only PR).
   #
-  # Behaviour matrix:
-  #   typescript ran and passed  → check passes  ✅
-  #   typescript ran and failed  → check fails   ❌  (build broken, merge blocked)
-  #   typescript was skipped     → check passes  ✅  (path filter, docs-only PR)
-  #   e2e ran and passed         → check passes  ✅
-  #   e2e ran and failed         → check fails   ❌  (e2e broken, merge blocked)
-  #   e2e was skipped            → check passes  ✅  (path filter, docs-only PR)
-  check:
-    name: Required check
+  # Behaviour matrix (job-level skipping, not workflow-level):
+  #   typescript ran and passed  → gate passes  ✅
+  #   typescript ran and failed  → gate fails   ❌  (build broken, merge blocked)
+  #   typescript was skipped     → gate passes  ✅  (path filter, docs-only PR)
+  #   e2e ran and passed         → gate passes  ✅
+  #   e2e ran and failed         → gate fails   ❌  (e2e broken, merge blocked)
+  #   e2e was skipped            → gate passes  ✅  (path filter, docs-only PR)
+  required:
+    name: CI / required
     runs-on: ubuntu-latest
     needs: [changes, typescript, e2e]
     if: always()
     steps:
-      - name: Assert typescript and e2e passed or were skipped
+      - name: Assert typescript, e2e, and lock-sync passed or were skipped
         run: |
           for result in "${{ needs.changes.result }}" "${{ needs.typescript.result }}" "${{ needs.e2e.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
