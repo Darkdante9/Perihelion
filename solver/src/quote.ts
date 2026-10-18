@@ -25,7 +25,7 @@
 
 import { isExpired, MIN_FILL_HEADROOM_SECS } from "@perihelion/sdk";
 import type { Intent } from "@perihelion/sdk";
-import { zeroAddress, isAddressEqual, type Address } from "viem";
+import { zeroAddress, isAddress, isAddressEqual, type Address } from "viem";
 import type { SolverConfig } from "./config.js";
 import type { InventoryProvider, InFlightTracker } from "./inventory.js";
 import { UnlimitedInventoryProvider } from "./inventory.js";
@@ -220,6 +220,10 @@ export function isSolverEligible(
   preferredSolver: string,
   solverAddress: Address,
 ): boolean {
+  // A malformed `preferredSolver` must not reach `isAddressEqual`, which throws
+  // `InvalidAddressError` on invalid input. Treat it as ineligible so the
+  // caller produces a terminal skip instead of an escaping exception.
+  if (!isAddress(preferredSolver)) return false;
   const preferred = preferredSolver as Address;
   return (
     isAddressEqual(preferred, zeroAddress) ||
@@ -307,8 +311,13 @@ export async function evaluate(
   if (profit <= 0n) {
     return { fill: false, code: "below_margin", reason: "fee-inclusive profit is non-positive", terminal: false };
   }
-  const profitBps = Number((profit * 10_000n) / proceeds);
-  if (profitBps < config.minMarginBps) {
+  // Carry profit at hundredths of a basis point so a sub-bps margin is not
+  // truncated to zero before the gate. Compare against the minimum scaled by
+  // 100, then convert to whole bps only for reporting.
+  const profitBpsScaled = (profit * 1_000_000n) / proceeds;
+  const minMarginBpsScaled = BigInt(config.minMarginBps) * 100n;
+  if (profitBpsScaled < minMarginBpsScaled) {
+    const profitBps = Number(profitBpsScaled / 100n);
     return {
       fill: false,
       code: "below_margin",
@@ -317,6 +326,7 @@ export async function evaluate(
       profitBps,
     };
   }
+  const profitBps = Number(profitBpsScaled / 100n);
 
   // ── sanity bound ──────────────────────────────────────────────────────────
   // A stablecoin corridor should never yield >10% profit; a figure this large

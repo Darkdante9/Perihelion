@@ -140,7 +140,7 @@ contract ForkTest is Test {
         emit log_named_bytes32("Escrow codehash", codehash);
         // When first deploying on a clean network, capture this hash and
         // replace EXPECTED_ESCROW_CODEHASH with it.
-        assertEq(codehash, codehash, "Escrow bytecode mismatch — update baseline"); // self-assert to log
+        assertEq(codehash, codehash, "Escrow bytecode mismatch - update baseline"); // self-assert to log
     }
 
     /// @notice The timelock bytecode must match the known-good baseline.
@@ -150,7 +150,7 @@ contract ForkTest is Test {
             codehash := extcodehash(address(timelock))
         }
         emit log_named_bytes32("Timelock codehash", codehash);
-        assertEq(codehash, codehash, "Timelock bytecode mismatch — update baseline");
+        assertEq(codehash, codehash, "Timelock bytecode mismatch - update baseline");
     }
 
     // --- Fork lifecycle: lock + confirm --------------------------------------
@@ -206,7 +206,7 @@ contract ForkTest is Test {
 
         assertEq(token.balanceOf(solver), solverBefore + 100_000);
         assertEq(token.balanceOf(address(escrow)), 0);
-        (,,,,, bool released,) = escrow.locks(h);
+        (,,,,,, bool released,) = escrow.locks(h);
         assertTrue(released);
     }
 
@@ -229,7 +229,7 @@ contract ForkTest is Test {
         );
 
         assertEq(token.balanceOf(user), userBefore);
-        (,,,,,, bool refunded) = escrow.locks(h);
+        (,,,,,,, bool refunded) = escrow.locks(h);
         assertTrue(refunded);
     }
 
@@ -248,7 +248,7 @@ contract ForkTest is Test {
         escrow.cancelExpired(h);
 
         assertEq(token.balanceOf(user), userBefore);
-        (,,,,,, bool refunded) = escrow.locks(h);
+        (,,,,,,, bool refunded) = escrow.locks(h);
         assertTrue(refunded);
     }
 
@@ -296,7 +296,7 @@ contract ForkTest is Test {
     // --- Timelock boundary tests (PR #237) -----------------------------------
 
     /// @dev Threshold-satisfying confirmations start the delay; one more
-    ///      confirmation must not reset the readyAt.
+    ///      confirmation must not reset the readyAt (the clock is monotonic).
     function testFork_Timelock_ExtraConfirmDoesNotResetDelay() public {
         address[] memory owners = new address[](3);
         owners[0] = address(0xA1);
@@ -316,6 +316,14 @@ contract ForkTest is Test {
         assertEq(readyAt, block.timestamp + 5 days, "readyAt set after 2nd confirmation");
 
         // Third confirmation must NOT reset the timer.
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(owners[2]);
+        tl.confirm(id);
+        (uint64 confs, uint64 readyAtAfter,,) = tl.operations(id);
+        assertEq(confs, 3, "third confirmation recorded");
+        assertEq(readyAtAfter, readyAt, "extra confirmation must not reset readyAt");
+
+        // A repeat confirmation from the same owner is rejected.
         vm.prank(owners[2]);
         vm.expectRevert(PerihelionTimelock.AlreadyConfirmed.selector);
         tl.confirm(id);

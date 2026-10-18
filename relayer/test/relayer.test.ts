@@ -6,6 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { Relayer, FatalError } from "../src/relayer.js";
 import { InMemoryDeadLetterStore } from "../src/dead-letter.js";
 import { messageKeyString } from "../src/types.js";
+import { validConfigEnv, VALID_ESCROW, VALID_CONTRACT } from "./fixtures.js";
 import type {
   DestinationDelivery,
   Logger,
@@ -26,9 +27,6 @@ function memCheckpoint(): CheckpointStore {
 }
 
 const silent: Logger = { info() {}, warn() {}, error() {} };
-
-const VALID_ESCROW = "0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA";
-const VALID_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4";
 
 function makeMsg(
   block: number,
@@ -53,16 +51,7 @@ function makeMsg(
 }
 
 function baseConfig() {
-  return loadConfig({
-    PERIHELION_ESCROW_ADDRESS: VALID_ESCROW,
-    PERIHELION_SETTLEMENT_CONTRACT: VALID_CONTRACT,
-    PERIHELION_EVM_RPC_URL: "http://localhost:8545",
-    PERIHELION_STELLAR_RPC_URL: "https://soroban-testnet.stellar.org",
-    PERIHELION_SOURCE_EID: "30101",
-    PERIHELION_STELLAR_EID: "40161",
-    STELLAR_NETWORK: "Test SDF Network ; September 2015",
-    SIGNER_SECRET: "SBZVMB74Z76QB3ZL2YFBN7EWUIXVXSNXKNQRIPZTKMZDDQ3FJBNRHWBU",
-  });
+  return loadConfig(validConfigEnv());
 }
 
 // ─── Issue 1: Config validation ─────────────────────────────────────────────
@@ -833,11 +822,16 @@ test("detects single-block reorg and rolls back cursor correctly", async () => {
           ],
         };
       }
+      // Block 10 is replaced: its parent (block 9) now has a different hash.
       return {
         messages: [],
         head: 10,
         headHash: "0xHASH10_NEW",
         parentHash: "0xHASH9_NEW",
+        blockHeaders: [
+          { number: 9, hash: "0xHASH9_NEW", parentHash: "0xHASH8" },
+          { number: 10, hash: "0xHASH10_NEW", parentHash: "0xHASH9_NEW" },
+        ],
       };
     },
   };
@@ -869,7 +863,7 @@ test("detects reorg at exactly confirmation depth threshold", async () => {
           messages: [],
           head: 10,
           headHash: "0xA",
-          parentHash: "0xB",
+          parentHash: "0x9",
           blockHeaders: [
             { number: 7, hash: "0x7", parentHash: "0x6" },
             { number: 8, hash: "0x8", parentHash: "0x7" },
@@ -878,13 +872,16 @@ test("detects reorg at exactly confirmation depth threshold", async () => {
           ],
         };
       }
+      // Block 9 is replaced; the new head 11 links to the new block 9.
       return {
         messages: [],
         head: 11,
         headHash: "0xB",
         parentHash: "0x9_NEW",
         blockHeaders: [
-          { number: 11, hash: "0xB", parentHash: "0x9_NEW" },
+          { number: 9, hash: "0x9_NEW", parentHash: "0x8" },
+          { number: 10, hash: "0xA_NEW", parentHash: "0x9_NEW" },
+          { number: 11, hash: "0xB", parentHash: "0xA_NEW" },
         ],
       };
     },
@@ -924,7 +921,7 @@ test("detects reorg exceeding confirmation limit and emits DEEP_REORG", async ()
           messages: [],
           head: 5,
           headHash: "0xHEAD1",
-          parentHash: "0xPARENT1",
+          parentHash: "0x4",
           blockHeaders: [
             { number: 3, hash: "0x3", parentHash: "0x2" },
             { number: 4, hash: "0x4", parentHash: "0x3" },
@@ -932,11 +929,17 @@ test("detects reorg exceeding confirmation limit and emits DEEP_REORG", async ()
           ],
         };
       }
+      // Block 4 is replaced; the new head 5 links to the new block 4, so the
+      // reorg depth (2) exceeds confirmations (1).
       return {
         messages: [],
         head: 5,
         headHash: "0xHEAD2",
-        parentHash: "0xFORK",
+        parentHash: "0x4_NEW",
+        blockHeaders: [
+          { number: 4, hash: "0x4_NEW", parentHash: "0x3" },
+          { number: 5, hash: "0xHEAD2", parentHash: "0x4_NEW" },
+        ],
       };
     },
   };
@@ -1160,5 +1163,59 @@ test("message re-polled after prolonged absence receives fresh retry budget", as
   await relayer.tick(); // nonce 99 reappears but was already dead-lettered
 
   assert.equal(relayer.metrics.deadLettered, 1, "dead-lettered message not retried even after re-appearing");
+  assert.equal(deliverCalls, 2, "no further delivery attempts for the dead-lettered message");
+});
+
+test("headers from a non-reorg tick are available for reorg detection on the next tick", async () => {
+  const config = { ...baseConfig(), confirmations: 2 };
+  let pollCount = 0;
+  const watcher: SourceWatcher = {
+    async poll() {
+      pollCount++;
+      if (pollCount === 1) {
+        // Non-reorg tick: no prior headers recorded, so this must not be a reorg.
+        return {
+          messages: [],
+          head: 10,
+          headHash: "0xHASH10",
+          parentHash: "0xHASH9",
+          blockHeaders: [
+            { number: 9, hash: "0xHASH9", parentHash: "0xHASH8" },
+            { number: 10, hash: "0xHASH10", parentHash: "0xHASH9" },
+          ],
+        };
+      }
+      // Next tick: block 9's hash changed, so the header recorded on the
+      // non-reorg tick must be available to detect the reorg.
+      return {
+        messages: [],
+        head: 10,
+        headHash: "0xHASH10_NEW",
+        parentHash: "0xHASH9_NEW",
+        blockHeaders: [
+          { number: 9, hash: "0xHASH9_NEW", parentHash: "0xHASH8" },
+          { number: 10, hash: "0xHASH10_NEW", parentHash: "0xHASH9_NEW" },
+        ],
+      };
+    },
+  };
+  const delivery: DestinationDelivery = {
+    async deliver() { return "0xdst"; },
+    async isDelivered() { return false; },
+  };
+
+  const checkpoint = memCheckpoint();
+  const relayer = new Relayer(config, watcher, delivery, silent, 0, checkpoint);
+
+  await relayer.tick();
+  const firstCursor = relayer.readiness.cursor;
+
+  await relayer.tick();
+  const secondCursor = relayer.readiness.cursor;
+
+  assert.ok(
+    secondCursor < firstCursor,
+    "reorg detected using headers recorded on the previous non-reorg tick",
+  );
 });
 

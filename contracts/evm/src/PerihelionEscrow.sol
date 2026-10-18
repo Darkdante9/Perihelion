@@ -624,6 +624,21 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         nonReentrant
         whenNotPaused
     {
+        // `lock` is split into narrowly-scoped helpers so no single frame holds
+        // enough live locals to exceed the legacy codegen's 16-slot stack limit
+        // (#857). Order of checks, effects and interactions is unchanged.
+        bytes32 intentHash = _validateIntent(intent, signature);
+        uint256 received = _pullFunds(intent);
+        _recordLock(intentHash, intent, received);
+        _dispatchFillInstruction(intentHash, intent);
+    }
+
+    /// @dev Stateless validation of a signed intent; returns its EIP-712 hash.
+    function _validateIntent(Intent calldata intent, bytes calldata signature)
+        private
+        view
+        returns (bytes32 intentHash)
+    {
         if (block.timestamp >= intent.deadline) revert IntentExpired();
         // #39: bind intent to the chain the user signed for.
         if (intent.sourceChainId != block.chainid) revert WrongChain();
@@ -649,10 +664,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (intent.sourceAmount > type(uint128).max) revert AmountTooLarge();
         if (intent.deadline > type(uint64).max) revert AmountTooLarge();
 
-        bytes32 intentHash = hashIntent(intent);
+        intentHash = hashIntent(intent);
         if (locks[intentHash].user != address(0)) revert AlreadyLocked();
         if (!_verify(intentHash, intent.user, signature)) revert InvalidSignature();
+    }
 
+    /// @dev Enforce value caps, pull `sourceAmount` from the user and return the
+    ///      amount the escrow actually received.
+    function _pullFunds(Intent calldata intent) private returns (uint256 received) {
         // Check value caps before pulling funds.
         _checkValueCaps(intent.sourceAmount, intent.sourceAsset);
 
@@ -660,7 +679,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // fee-on-transfer / rebasing tokens can never release more than is held.
         uint256 balBefore = IERC20(intent.sourceAsset).balanceOf(address(this));
         _safeTransferFrom(intent.sourceAsset, intent.user, address(this), intent.sourceAmount);
-        uint256 received = IERC20(intent.sourceAsset).balanceOf(address(this)) - balBefore;
+        received = IERC20(intent.sourceAsset).balanceOf(address(this)) - balBefore;
         // Measured-delta off a balance diff after the pull is intentional; the
         // exact-zero check rejects transfers that delivered nothing (e.g. a
         // fully-taxed token). Safe under `nonReentrant`.
@@ -669,7 +688,10 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
         // Commit the actual received amount to the rolling window accumulator.
         _commitValueCaps(received);
+    }
 
+    /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
+    function _recordLock(bytes32 intentHash, Intent calldata intent, uint256 received) private {
         // The lock is written after the pull because measured-delta needs the
         // post-transfer balance; safe because `lock` and every fund-moving path
         // are `nonReentrant`, so the token callback cannot re-enter them.
@@ -699,7 +721,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             uint128(intent.minDestAmount),
             uint64(intent.deadline)
         );
+    }
 
+    /// @dev Quote, send the FillInstruction over LayerZero and refund any
+    ///      excess `msg.value` to the caller.
+    function _dispatchFillInstruction(bytes32 intentHash, Intent calldata intent) private {
         bytes memory message = _encodeFillInstruction(intentHash, intent);
         // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
         // sized off-chain via quoteFee is the same value compared against below.

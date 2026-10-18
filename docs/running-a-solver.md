@@ -93,6 +93,7 @@ cp solver/.env.example solver/.env
 | `PERIHELION_ESCROW_ADDRESS` | `0x5678...` | Deployed escrow contract address |
 | `PERIHELION_SETTLEMENT_CONTRACT_ID` | `ABC123...` | Soroban settlement contract ID |
 | `PERIHELION_SOURCE_CHAIN_ID` | `8453` | LayerZero EID of the source chain |
+| `STELLAR_NETWORK` | `testnet` | Stellar network the solver targets (`testnet` or `mainnet`). **Required** — the solver refuses to start without it. Must be set alongside the other executor variables (`PERIHELION_EVM_RPC_URL`, `PERIHELION_SOROBAN_RPC_URL`, keys, contract addresses) and must match the network your Soroban RPC endpoint and settlement contract are deployed on. |
 | `PERIHELION_METRICS_PORT` | `9090` | Port for the `/metrics` Prometheus endpoint |
 | `PERIHELION_METRICS_HOST` | `127.0.0.1` | Bind address for `/metrics` — see [Network exposure](#network-exposure) before widening |
 | `PERIHELION_METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>` |
