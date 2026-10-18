@@ -61,3 +61,13 @@ test("stellar healthcheck probes getHealth without relying on node", () => {
   assert.match(probe, /curl/);
   assert.ok(!check.includes("node"), "stellar/quickstart does not ship Node.js");
 });
+
+test("mempool inherits the image's /healthz healthcheck instead of overriding it", () => {
+  assert.equal(service("mempool").healthcheck, undefined);
+});
+
+test("relayer and solver wait for a healthy mempool, not just a started container", () => {
+  for (const name of ["relayer", "solver"]) {
+    assert.equal(service(name).depends_on?.mempool?.condition, "service_healthy", name);
+  }
+});

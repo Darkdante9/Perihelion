@@ -57,12 +57,7 @@ services:
       - "3000:3000"
     networks:
       - perihelion
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 404 ? 0 : 1)).on('error', () => process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+    # No healthcheck override: the image's healthcheck.cjs probes /healthz.
 
   # Perihelion relayer
   relayer:
@@ -73,7 +68,7 @@ services:
         PACKAGE: relayer
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
         condition: service_started
       stellar:
@@ -121,7 +116,7 @@ services:
         PACKAGE: solver
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
         condition: service_started
       stellar:
