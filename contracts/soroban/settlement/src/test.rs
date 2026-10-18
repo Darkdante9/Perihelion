@@ -231,6 +231,18 @@ pub(crate) fn hash(env: &Env, b: u8) -> BytesN<32> {
     BytesN::from_array(env, &[b; 32])
 }
 
+/// A solver EVM identity in the shape the EVM escrow decodes: a 20-byte
+/// address left-padded with 12 zero bytes to 32.
+fn evm_solver(env: &Env, b: u8) -> BytesN<32> {
+    let mut raw = [0u8; 32];
+    raw[12..].fill(b);
+    BytesN::from_array(env, &raw)
+}
+
+fn advance_ledgers(s: &Setup, ledgers: u32) {
+    s.env.ledger().with_mut(|li| li.sequence_number += ledgers);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_intent(
     s: &Setup,
@@ -1211,7 +1223,7 @@ fn filled_event_shape() {
 
     let h = hash(&s.env, 2);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     let fill_amount = 250_000;
     s.client
         .fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
@@ -1274,7 +1286,7 @@ fn confirmation_sent_event_shape() {
 
     let h = hash(&s.env, 5);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     // Fill without dispatch via deliver_intent
     s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
 
@@ -1302,7 +1314,7 @@ fn status_filled_after_deliver_without_dispatch() {
 
     let h = hash(&s.env, 0xD1);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     // Settled marker is set but ConfirmationSent is not.
@@ -1332,7 +1344,7 @@ fn status_confirmation_sent_after_dispatch() {
 
     let h = hash(&s.env, 0xD2);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     let caller = Address::generate(&s.env);
@@ -1355,7 +1367,7 @@ fn status_confirmation_sent_after_fill_intent() {
 
     let h = hash(&s.env, 0xD3);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
 
     assert_eq!(
@@ -1385,7 +1397,7 @@ fn status_uses_markers_independently_of_record() {
     // Path A: only Settled marker (deliver_intent, no dispatch).
     let ha = hash(&s.env, 0xD4);
     register_intent(&s, &ha, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &ha, &100_000);
     assert_eq!(s.client.status(&ha), Some(IntentStatus::Filled));
 
@@ -1930,7 +1942,7 @@ fn fill_dispatches_evm_decodable_confirmation() {
 
     let h = hash(&s.env, 1);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
     let msg = s.mock.last().message;
@@ -2706,7 +2718,7 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
 
     let h = hash(&s.env, 0xE1);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // Solver delivers but does NOT dispatch.
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
@@ -2716,6 +2728,9 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
     assert_eq!(s.mock.sent(), 0, "no confirmation sent yet");
 
     let keeper_balance_before = native_client.balance(&keeper);
+
+    // The confirmation has stalled for the full grace period.
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
 
     // Keeper dispatches the stalled confirmation.
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2762,6 +2777,73 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
     assert!(sent_found, "confirmation_sent event not emitted");
 }
 
+/// Issue 914: the solver dispatching its own fill earns nothing, even after the
+/// grace period, so the reserve is not drained by every normal fill.
+#[test]
+fn solver_self_dispatch_after_grace_earns_no_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s.client.native_token().expect("native_token configured");
+    let native_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+    native_admin.mint(&s.client.address, &1_000_000i128);
+    s.client.set_dispatch_keeper_reward(&80_000i128);
+
+    let h = hash(&s.env, 0xE4);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
+
+    let solver_balance_before = native_client.balance(&solver);
+    s.client.dispatch_confirmation(&solver, &h, &0);
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+    assert_eq!(s.mock.sent(), 1, "FillConfirmed must still be dispatched");
+    assert_eq!(
+        native_client.balance(&solver),
+        solver_balance_before,
+        "solver must not receive the dispatch reward for its own fill"
+    );
+}
+
+/// Issue 914: a third party dispatching before the fill has been unconfirmed
+/// for the grace period is not paid, so solvers cannot farm the reward by
+/// racing their own fill.
+#[test]
+fn third_party_dispatch_before_grace_earns_no_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s.client.native_token().expect("native_token configured");
+    let native_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+    native_admin.mint(&s.client.address, &1_000_000i128);
+    s.client.set_dispatch_keeper_reward(&80_000i128);
+
+    let h = hash(&s.env, 0xE5);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS - 1);
+
+    let keeper_balance_before = native_client.balance(&keeper);
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+    assert_eq!(
+        native_client.balance(&keeper),
+        keeper_balance_before,
+        "reward must not be paid before the grace period elapses"
+    );
+}
+
 /// AC3 variant: When dispatch_keeper_reward is 0, no reward is paid and
 /// dispatch still succeeds (zero-reward is the default / opt-out path).
 #[test]
@@ -2775,7 +2857,7 @@ fn dispatch_confirmation_with_zero_reward_still_succeeds() {
     // dispatch_keeper_reward left at default 0.
     let h = hash(&s.env, 0xE2);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2807,8 +2889,9 @@ fn dispatch_confirmation_skips_reward_when_native_token_unset() {
 
     let h = hash(&s.env, 0xE3);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
 
     // Should not revert despite missing native_token.
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2835,7 +2918,7 @@ fn list_undispatched_intents_filters_correctly() {
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
     s.asset_admin.mint(&solver, &5_000_000);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // h1: Locked (never filled).
     let h1 = hash(&s.env, 0xF1);
@@ -2886,7 +2969,7 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     let h = hash(&s.env, 0xE4);
     // Set a tight deadline so we can advance past it.
     register_intent(&s, &h, &recipient, 100_000, 3_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // Deliver asset but do not dispatch confirmation.
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);

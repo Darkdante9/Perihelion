@@ -406,10 +406,13 @@ await settlementClient.dispatch_confirmation(
 
 **Keeper incentive.** The contract admin can configure `dispatch_keeper_reward`
 (independently of `keeper_reward` for cancellations) via
-`set_dispatch_keeper_reward`. When non-zero, any caller of
-`dispatch_confirmation` receives that many stroops from the contract's native
-token balance, compensating the LayerZero fee and making it economically
-rational for a third-party keeper service to push stalled confirmations through.
+`set_dispatch_keeper_reward`. When non-zero, a caller of `dispatch_confirmation`
+other than the solver receives that many stroops from the contract's native
+token balance, once the fill has been unconfirmed for about 30 minutes
+(`DISPATCH_REWARD_GRACE_LEDGERS`, 360 ledgers). This compensates the LayerZero
+fee for a stalled confirmation, making it economically rational for a
+third-party keeper service to push it through. The solver's own dispatch never
+earns the reward. See `docs/ECONOMICS.md` for the rationale.
 
 Check the current reward and whether it covers your expected `lz_fee`:
 

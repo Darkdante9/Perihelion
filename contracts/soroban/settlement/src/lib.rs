@@ -198,6 +198,12 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
 pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
 
+/// Ledgers a fill must stay unconfirmed before a third party may collect the
+/// dispatch keeper reward. About 30 minutes at ~5 second ledger close, matching
+/// `MIN_DISPATCH_WINDOW`. Without this delay the reward subsidises every fill
+/// instead of compensating a stalled confirmation.
+pub const DISPATCH_REWARD_GRACE_LEDGERS: u32 = 360;
+
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
 /// Matches the EVM's 1-day minimum to give users time to react to peer rotations.
@@ -1214,12 +1220,22 @@ impl Perihelion {
         // economically self-sustaining rather than relying on altruism.
         // The reward is paid after the dispatch is finalized so a failure here
         // does not roll back the confirmation.
+        //
+        // Only a stalled confirmation earns the reward: the solver dispatching
+        // its own fill is never paid, and any other caller must wait until the
+        // fill has been unconfirmed for DISPATCH_REWARD_GRACE_LEDGERS.
         let dispatch_reward: i128 = env
             .storage()
             .instance()
             .get(&DataKey::DispatchKeeperReward)
             .unwrap_or(0);
-        if dispatch_reward > 0 {
+        let reward_eligible = caller != solver
+            && env
+                .ledger()
+                .sequence()
+                .saturating_sub(rec.fill_ledger)
+                >= DISPATCH_REWARD_GRACE_LEDGERS;
+        if dispatch_reward > 0 && reward_eligible {
             if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
                 token::TokenClient::new(&env, &native_token).transfer(
                     &env.current_contract_address(),
@@ -1673,6 +1689,8 @@ impl Perihelion {
     /// `set_dispatch_keeper_reward`. A non-zero value incentivises third-party
     /// keepers to push stalled FillConfirmed messages through, recovering solver
     /// capital when the original solver is unable to complete the dispatch.
+    /// The reward is only paid to a caller other than the solver, once the fill
+    /// is `DISPATCH_REWARD_GRACE_LEDGERS` old.
     pub fn dispatch_keeper_reward(env: Env) -> i128 {
         env.storage()
             .instance()
