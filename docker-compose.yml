@@ -15,7 +15,8 @@ services:
     image: stellar/quickstart:21.2.0
     command: --local --enable-soroban-rpc
     environment:
-      STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      # Must match the network `--local` creates; the Testnet passphrase is rejected.
+      STELLAR_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
       SOROBAN_RPC_HOST: "0.0.0.0"
       SOROBAN_RPC_PORT: "8000"
     ports:
@@ -25,7 +26,8 @@ services:
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      # The quickstart image has no Node.js; probe Soroban RPC's getHealth instead.
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/rpc | grep -q healthy"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -82,8 +84,8 @@ services:
       PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_SOURCE_EID: 30101
       # Stellar configuration
-      PERIHELION_STELLAR_RPC_URL: http://stellar:8000
-      STELLAR_NETWORK: "Test SDF Network ; September 2015"
+      PERIHELION_STELLAR_RPC_URL: http://stellar:8000/rpc
+      STELLAR_NETWORK: "Standalone Network ; February 2017"
       PERIHELION_STELLAR_EID: 40161
       # Relayer configuration
       PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
@@ -141,9 +143,9 @@ services:
       PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_EVM_PRIVATE_KEY: ${PERIHELION_EVM_PRIVATE_KEY:?set PERIHELION_EVM_PRIVATE_KEY}
       # Executor configuration (Soroban)
-      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
+      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000/rpc
       PERIHELION_SOROBAN_SECRET_KEY: ${PERIHELION_SOROBAN_SECRET_KEY:?set PERIHELION_SOROBAN_SECRET_KEY}
-      STELLAR_NETWORK: "Test SDF Network ; September 2015"
+      STELLAR_NETWORK: "Standalone Network ; February 2017"
       PERIHELION_SETTLEMENT_CONTRACT_ID: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
       # Cache configuration
       PERIHELION_VERIFICATION_CACHE_SIZE: "10000"

@@ -41,6 +41,10 @@ versioned independently.
 
 ### Fixed
 
+- The local Stellar quickstart service in `docker-compose.yml` uses the standalone
+  network passphrase that `--local` creates, points the relayer and solver at the
+  `/rpc` Soroban endpoint, and probes `getHealth` with `curl` instead of `node`,
+  which the quickstart image does not ship (#894).
 - The differential-fuzz workflow runs again (#816, #823, #824, #825). It now
   installs Foundry `stable` (the pinned nightly had been pruned and returned
   HTTP 404), reads the Soroban SDK major version correctly (the greedy `sed`
