@@ -87,6 +87,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
+      # rust-toolchain.toml overrides whatever is installed here once cargo runs
+      # inside the repo, so read the pin from it instead of hard-coding a second
+      # (drifting) copy. Mirrors .github/workflows/soroban.yml.
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master (pinned)
         with:
@@ -168,6 +175,10 @@ jobs:
         with:
           name: soroban-fuzz-corpus
           path: contracts/shared/wire-vectors/fuzz-corpus/
+
+      - name: Read pinned Rust toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de  # master (pinned)
