@@ -70,6 +70,9 @@ pub enum PerihelionError {
     InvalidDelay = 152,
     /// A peer change is already pending for this eid, must cancel first (issue #715).
     PendingPeerChangeExists = 153,
+    /// Intent is reserved for its preferred solver or source-escrow identity until
+    /// the reservation window expires.
+    ReservedForSolver = 154,
 
     // --- Messaging ---
     /// Payload failed structural validation.

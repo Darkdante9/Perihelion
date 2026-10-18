@@ -83,14 +83,14 @@ impl MockEndpoint {
 
 // --- Test harness -------------------------------------------------------------
 
-struct Setup {
-    env: Env,
-    client: PerihelionClient<'static>,
-    mock: MockEndpointClient<'static>,
-    asset: Address,
-    asset_admin: token::StellarAssetClient<'static>,
-    src_eid: u32,
-    peer: BytesN<32>,
+pub(crate) struct Setup {
+    pub(crate) env: Env,
+    pub(crate) client: PerihelionClient<'static>,
+    pub(crate) mock: MockEndpointClient<'static>,
+    pub(crate) asset: Address,
+    pub(crate) asset_admin: token::StellarAssetClient<'static>,
+    pub(crate) src_eid: u32,
+    pub(crate) peer: BytesN<32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,7 +181,7 @@ fn register_peer(env: &Env, client: &PerihelionClient, eid: u32, peer: &BytesN<3
     });
 }
 
-fn setup() -> Setup {
+pub(crate) fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| {
@@ -227,12 +227,12 @@ fn setup() -> Setup {
     }
 }
 
-fn hash(env: &Env, b: u8) -> BytesN<32> {
+pub(crate) fn hash(env: &Env, b: u8) -> BytesN<32> {
     BytesN::from_array(env, &[b; 32])
 }
 
 #[allow(clippy::too_many_arguments)]
-fn register_intent(
+pub(crate) fn register_intent(
     s: &Setup,
     h: &BytesN<32>,
     recipient: &Address,
@@ -263,7 +263,7 @@ fn register_intent_with_window(
         min_dest_amount: min,
         deadline,
         preferred_solver: preferred,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window,
     };
     let origin = Origin {
@@ -465,7 +465,7 @@ fn rejects_message_from_untrusted_peer() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let bad_sender = BytesN::from_array(&s.env, &[0xAB; 32]);
@@ -722,7 +722,7 @@ fn try_deliver_nonce(
         min_dest_amount: 1,
         deadline,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -756,9 +756,11 @@ fn nonce_pruned_event_count(env: &Env) -> usize {
         .all()
         .iter()
         .filter(|(_, topics, _)| {
-            topics
-                .iter()
-                .any(|t| Symbol::try_from_val(env, &t).map(|s| s == expected).unwrap_or(false))
+            topics.iter().any(|t| {
+                Symbol::try_from_val(env, &t)
+                    .map(|s| s == expected)
+                    .unwrap_or(false)
+            })
         })
         .count()
 }
@@ -943,7 +945,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -1089,7 +1091,8 @@ fn set_endpoint_emits_event() {
 fn peer_governance_propose_emits_event() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let events = s.env.events().all();
     assert!(!events.is_empty(), "expected peer_change_proposed event");
 }
@@ -1098,7 +1101,8 @@ fn peer_governance_propose_emits_event() {
 fn peer_governance_confirm_requires_delay() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Should fail if called before the delay
     assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
@@ -1114,7 +1118,8 @@ fn peer_governance_confirm_requires_delay() {
 fn peer_governance_cancel_clears_pending() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Cancel the pending peer change
     assert!(s.client.try_cancel_pending_peer(&s.src_eid).is_ok());
@@ -1137,7 +1142,8 @@ fn peer_governance_get_pending_peer() {
     assert!(pending.unwrap().unwrap().is_none());
 
     // After propose, should return the pending peer
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
     let (peer, _proposed_at, _ready_at, _expires_at) = pending.unwrap().unwrap().unwrap();
@@ -1440,7 +1446,8 @@ fn peer_set_event_shape() {
     let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
 
     // Propose the new peer
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Advance time past the minimum delay
     s.env.ledger().with_mut(|li| {
@@ -1577,7 +1584,7 @@ fn registration_rejected_when_no_peer_for_src_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     // Deliver via the registered peer for s.src_eid (transport origin is fine),
@@ -2443,7 +2450,7 @@ fn cancel_succeeds_without_native_token_configured() {
         min_dest_amount: 100_000,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -2565,7 +2572,6 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
         assert_parity(&h, 0, PerihelionError::InvalidAmount, "zero amount");
     }
-
 }
 
 // --- Rolling-window accessors (issue #680) -----------------------------------
@@ -2799,10 +2805,7 @@ fn dispatch_confirmation_skips_reward_when_native_token_unset() {
     // a deployment where the admin forgot to call set_native_token.
     s.client.set_dispatch_keeper_reward(&50_000i128);
     s.env.as_contract(&s.client.address, || {
-        s.env
-            .storage()
-            .instance()
-            .remove(&DataKey::NativeToken);
+        s.env.storage().instance().remove(&DataKey::NativeToken);
     });
 
     let h = hash(&s.env, 0xE3);
@@ -2849,7 +2852,8 @@ fn list_undispatched_intents_filters_correctly() {
     // h3: Fully confirmed via fill_intent — should NOT appear.
     let h3 = hash(&s.env, 0xF3);
     register_intent(&s, &h3, &recipient, 100_000, 9_000, 3, None);
-    s.client.fill_intent(&solver, &solver_evm, &h3, &100_000, &0);
+    s.client
+        .fill_intent(&solver, &solver_evm, &h3, &100_000, &0);
 
     // h4: Filled via deliver_intent, then dispatched — should NOT appear.
     let h4 = hash(&s.env, 0xF4);
@@ -2913,7 +2917,7 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
 
     // The keeper can still dispatch to recover the solver's capital.
     s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset to before-deadline for dispatch
-    // (dispatch_confirmation has no deadline restriction — it's the recovery path)
+                                                        // (dispatch_confirmation has no deadline restriction — it's the recovery path)
     s.client.dispatch_confirmation(&keeper, &h, &0);
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
 }

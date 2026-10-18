@@ -440,7 +440,12 @@ impl Perihelion {
     /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
     /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
     /// counterparty for a given endpoint id is symmetric.
-    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>, delay: u64) -> Result<(), PerihelionError> {
+    pub fn propose_peer(
+        env: Env,
+        eid: u32,
+        new_peer: BytesN<32>,
+        delay: u64,
+    ) -> Result<(), PerihelionError> {
         Self::require_admin(&env)?.require_auth();
         if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
             return Err(PerihelionError::InvalidDelay);
@@ -573,7 +578,10 @@ impl Perihelion {
     ) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
-        let delay: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerDelay(eid));
+        let delay: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerDelay(eid));
 
         Ok(match (peer, time, delay) {
             (Some(p), Some(t), Some(d)) => {
@@ -894,9 +902,7 @@ impl Perihelion {
         Self::require_not_paused(&env)?;
 
         let instance = env.storage().instance();
-        let floor: u64 = instance
-            .get(&DataKey::InboundNonceFloor(eid))
-            .unwrap_or(0);
+        let floor: u64 = instance.get(&DataKey::InboundNonceFloor(eid)).unwrap_or(0);
         let old_floor = floor;
 
         // Word containing the current floor. Words strictly below it were
@@ -1170,11 +1176,7 @@ impl Perihelion {
         // Refuse a Stellar dispatch after that earliest possible refund boundary;
         // otherwise the user could be refunded on EVM and then receive a late
         // FillConfirmed message for the same intent.
-        if env
-            .ledger()
-            .timestamp()
-            > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW)
-        {
+        if env.ledger().timestamp() > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW) {
             return Err(PerihelionError::IntentExpired);
         }
 
@@ -1327,10 +1329,8 @@ impl Perihelion {
 
         // Emit confirmation_sent event — issue #709: this event is needed for off-chain
         // reconciliation to know the repayment message has been dispatched.
-        env.events().publish(
-            (events::confirmation_sent(&env), intent_hash),
-            (solver,),
-        );
+        env.events()
+            .publish((events::confirmation_sent(&env), intent_hash), (solver,));
         Ok(())
     }
 
@@ -1572,8 +1572,7 @@ impl Perihelion {
         let mut out = soroban_sdk::Vec::new(&env);
         for h in intent_hashes.iter() {
             // Filled = Settled marker present AND ConfirmationSent marker absent.
-            if p.has(&DataKey::Settled(h.clone()))
-                && !p.has(&DataKey::ConfirmationSent(h.clone()))
+            if p.has(&DataKey::Settled(h.clone())) && !p.has(&DataKey::ConfirmationSent(h.clone()))
             {
                 out.push_back(h);
             }
@@ -1618,10 +1617,7 @@ impl Perihelion {
 
     /// Quote the LayerZero native fee required to dispatch a FillConfirmed message
     /// to `dst_eid` (the source-chain EVM escrow).
-    pub fn quote_fill_confirmed_fee(
-        env: Env,
-        dst_eid: u32,
-    ) -> Result<i128, PerihelionError> {
+    pub fn quote_fill_confirmed_fee(env: Env, dst_eid: u32) -> Result<i128, PerihelionError> {
         let dummy_message =
             soroban_sdk::Bytes::from_slice(&env, &[0u8; FILL_CONFIRMED_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)
@@ -1629,10 +1625,7 @@ impl Perihelion {
 
     /// Quote the LayerZero native fee required to dispatch a CancelIntent message
     /// to `dst_eid` (the source-chain EVM escrow).
-    pub fn quote_cancel_fee(
-        env: Env,
-        dst_eid: u32,
-    ) -> Result<i128, PerihelionError> {
+    pub fn quote_cancel_fee(env: Env, dst_eid: u32) -> Result<i128, PerihelionError> {
         let dummy_message =
             soroban_sdk::Bytes::from_slice(&env, &[0u8; CANCEL_INTENT_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)

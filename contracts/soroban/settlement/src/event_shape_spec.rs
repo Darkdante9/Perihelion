@@ -110,7 +110,7 @@ fn deliver_fill_instruction(
         min_dest_amount: 100,
         deadline,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -288,7 +288,8 @@ fn cancel_ignored_topic() {
 fn peer_change_proposed_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     assert_event_shape(&s.env, "peer_change_proposed", 1);
 }
 
@@ -296,7 +297,8 @@ fn peer_change_proposed_topic() {
 fn peer_change_cancelled_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     s.client.cancel_pending_peer(&s.src_eid);
     assert_event_shape(&s.env, "peer_change_cancelled", 1);
 }
