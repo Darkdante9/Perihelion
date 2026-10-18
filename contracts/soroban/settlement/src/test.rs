@@ -2570,26 +2570,91 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
 // --- Rolling-window accessors (issue #680) -----------------------------------
 
+/// Deliver a FillInstruction as raw LayerZero bytes through `lz_receive_bytes`,
+/// the inbound path the endpoint uses in production. Used by the rolling-window
+/// breaker tests, which must exercise the real `Ok`/`Err` outcome of a breach.
+fn try_deliver_fill_bytes(
+    s: &Setup,
+    h: &BytesN<32>,
+    recipient: &Address,
+    min: i128,
+    nonce: u64,
+) -> Result<(), PerihelionError> {
+    let fi = FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: s.src_eid,
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: min,
+        deadline: 20_000,
+        preferred_solver: None,
+        locked_solver: Some(BytesN::from_array(&s.env, &[0x22; 32])),
+        reservation_window: 0,
+    };
+    let message = crate::messages::encode_fill_instruction(&s.env, &fi);
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    match s.client.try_lz_receive_bytes(&origin, &guid, &message) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => panic!("lz_receive_bytes return value failed to convert: {e:?}"),
+        Err(e) => Err(e.expect("lz_receive_bytes aborted with a non-contract error")),
+    }
+}
+
 #[test]
 fn get_rolling_window_reset_at_reports_latched_reset_time() {
     let s = setup();
+    // One-hour window with a 1_000 cap.
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
 
-    // Nothing latched before the cap triggers.
+    // Nothing latched while the window is under the cap.
+    assert_eq!(s.client.get_rolling_window_reset_at(), None);
+    try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 600, 1)
+        .expect("600 is within the 1_000 cap");
     assert_eq!(s.client.get_rolling_window_reset_at(), None);
 
-    // Seed the latched state the breaker writes when the cap trips. Driving it
-    // through lz_receive is not possible today: the breaker returns `Err`
-    // after writing, so the latch is rolled back with the rest of the call
-    // (tracked separately in #710).
-    let reset_at: u64 = 1_000 + 3_600;
-    s.env.as_contract(&s.client.address, || {
-        let storage = s.env.storage().instance();
-        storage.set(&DataKey::RollingWindowTriggered, &true);
-        storage.set(&DataKey::RollingWindowResetEarliestAt, &reset_at);
-    });
-
+    // The breaching message is acknowledged (Ok) but registers no intent,
+    // and the latch and its reset time persist (#904).
+    try_deliver_fill_bytes(&s, &hash(&s.env, 2), &recipient, 600, 2)
+        .expect("a breach must be acknowledged, not rolled back");
     assert!(s.client.is_rolling_window_cap_triggered());
-    assert_eq!(s.client.get_rolling_window_reset_at(), Some(reset_at));
+    assert!(s.client.get_intent(&hash(&s.env, 2)).is_none());
+    assert_eq!(
+        s.client.get_rolling_window_reset_at(),
+        Some(s.env.ledger().timestamp() + 3_600)
+    );
+}
+
+#[test]
+fn rolling_window_latch_rejects_until_admin_reset() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
+    let reset_at = s.env.ledger().timestamp() + 3_600;
+
+    try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 1_200, 1)
+        .expect("breach is acknowledged");
+    assert!(s.client.is_rolling_window_cap_triggered());
+
+    // A below-cap message is still rejected while latched: the breaker holds
+    // even though this amount would fit in a fresh window.
+    let err = try_deliver_fill_bytes(&s, &hash(&s.env, 2), &recipient, 1, 2)
+        .expect_err("latched breaker must reject new intents");
+    assert_eq!(err, PerihelionError::RollingWindowCapTriggered);
+    assert!(s.client.get_intent(&hash(&s.env, 2)).is_none());
+
+    // Once the reset time passes and the admin resets, the same message registers.
+    s.env.ledger().with_mut(|li| li.timestamp = reset_at);
+    s.client.reset_rolling_window_cap();
+    assert!(!s.client.is_rolling_window_cap_triggered());
+    try_deliver_fill_bytes(&s, &hash(&s.env, 3), &recipient, 1, 3)
+        .expect("after reset a below-cap message registers");
+    assert!(s.client.get_intent(&hash(&s.env, 3)).is_some());
 }
 
 #[test]
