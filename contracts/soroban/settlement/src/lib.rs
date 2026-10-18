@@ -38,7 +38,7 @@ pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
 
@@ -217,7 +217,11 @@ pub struct Perihelion;
 
 #[contractimpl]
 impl Perihelion {
-    /// Initialize with an admin, the trusted LayerZero endpoint, and the native token address.
+    /// Configure the contract with an admin, the trusted LayerZero endpoint, and the
+    /// native token address. Runs as the Soroban constructor, so the configuration is
+    /// written in the same transaction that creates the contract instance (issue #910).
+    /// There is no separate initialiser to front-run: the first observable state of
+    /// the contract already names its admin and endpoint.
     ///
     /// # Validation (issue #18)
     /// - `admin` and `endpoint` must be distinct addresses. Conflating them
@@ -239,19 +243,13 @@ impl Perihelion {
     ///
     /// Emits an `initialized` event so deployment tooling can confirm the
     /// configured values without polling storage.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        endpoint: Address,
-        native_token: Address,
-    ) -> Result<(), PerihelionError> {
+    pub fn __constructor(env: Env, admin: Address, endpoint: Address, native_token: Address) {
         let storage = env.storage().instance();
-        if storage.has(&DataKey::Admin) {
-            return Err(PerihelionError::AlreadyInitialized);
-        }
         // Issue #18: reject identical admin and endpoint — role separation invariant.
+        // A constructor cannot return an error to the deployer, so a failed check
+        // aborts the deployment transaction, which is the only atomic outcome here.
         if admin == endpoint {
-            return Err(PerihelionError::AdminEndpointCollision);
+            panic_with_error!(&env, PerihelionError::AdminEndpointCollision);
         }
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Endpoint, &endpoint);
@@ -269,7 +267,6 @@ impl Perihelion {
         // monitors can confirm the configured roles without polling storage.
         env.events()
             .publish((events::initialized(&env),), (admin, endpoint));
-        Ok(())
     }
 
     // --- Admin configuration ---------------------------------------------------

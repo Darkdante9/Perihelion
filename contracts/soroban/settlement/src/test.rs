@@ -193,15 +193,13 @@ pub(crate) fn setup() -> Setup {
     let endpoint = env.register(MockEndpoint, ());
     let mock = MockEndpointClient::new(&env, &endpoint);
 
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
-
     // Create a mock native token for testing keeper rewards
     let issuer = Address::generate(&env);
     let native_sac = env.register_stellar_asset_contract_v2(issuer);
     let native_token = native_sac.address();
 
-    client.initialize(&admin, &endpoint, &native_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
@@ -963,33 +961,44 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         "src_eid must be overridden to transport origin.src_eid, not the body-declared attacker_eid");
 }
 
-#[test]
-#[should_panic(expected = "Error(Contract, #100)")] // AlreadyInitialized
-fn rejects_double_initialize() {
-    let s = setup();
-    let admin = Address::generate(&s.env);
-    let endpoint = Address::generate(&s.env);
-    let native_token = Address::generate(&s.env);
-    s.client.initialize(&admin, &endpoint, &native_token);
-}
-
-// --- Issue #18: initialize validation ----------------------------------------
+// --- Issue #910: configuration is set by the constructor, not a separate call ---
 
 #[test]
-#[should_panic(expected = "Error(Contract, #134)")] // AdminEndpointCollision
-fn rejects_initialize_with_admin_eq_endpoint() {
+fn constructor_sets_endpoint_and_native_token_at_deploy() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000;
         li.max_entry_ttl = 3_110_400;
     });
-    let id = env.register(Perihelion, ());
+    let admin = Address::generate(&env);
+    let endpoint = env.register(MockEndpoint, ());
+    let native_token = Address::generate(&env);
+
+    // Deploying with arguments is the only way to create the contract, so there
+    // is no window in which a third party can name its admin or endpoint first.
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
     let client = PerihelionClient::new(&env, &id);
+
+    assert_eq!(client.endpoint(), endpoint);
+    assert_eq!(client.native_token(), Some(native_token));
+}
+
+// --- Issue #18: constructor validation ----------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #134)")] // AdminEndpointCollision
+fn rejects_constructor_with_admin_eq_endpoint() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+        li.max_entry_ttl = 3_110_400;
+    });
     let addr = Address::generate(&env);
     let native_token = Address::generate(&env);
-    // admin == endpoint must be rejected
-    client.initialize(&addr, &addr, &native_token);
+    // admin == endpoint must abort deployment
+    env.register(Perihelion, (&addr, &addr, &native_token));
 }
 
 #[test]
@@ -1001,11 +1010,9 @@ fn initialize_emits_event() {
         li.max_entry_ttl = 3_110_400;
     });
     let endpoint_addr = env.register(MockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
     let native_token = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr, &native_token);
+    env.register(Perihelion, (&admin, &endpoint_addr, &native_token));
     // Verify the initialized event was published (env records all events).
     let events = env.events().all();
     let expected = Symbol::new(&env, "initialized");
@@ -1413,11 +1420,9 @@ fn initialized_event_shape() {
         li.max_entry_ttl = 3_110_400;
     });
     let endpoint_addr = env.register(MockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
     let native_token = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr, &native_token);
+    env.register(Perihelion, (&admin, &endpoint_addr, &native_token));
 
     let events = env.events().all();
     // Event: ("initialized",) -> (admin, endpoint)
@@ -2416,14 +2421,12 @@ fn cancel_succeeds_without_native_token_configured() {
     let endpoint = env.register(MockEndpoint, ());
     let _mock = MockEndpointClient::new(&env, &endpoint);
 
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
-
-    // Initialize with a native token that we'll use initially
+    // Configure with a native token that we'll use initially
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let initial_token = sac.address();
-    client.initialize(&admin, &endpoint, &initial_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &initial_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);

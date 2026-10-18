@@ -61,14 +61,13 @@ fn setup() -> Setup {
 
     let admin = Address::generate(&env);
     let endpoint = env.register(EventSpecMockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
 
     let issuer = Address::generate(&env);
     let native_sac = env.register_stellar_asset_contract_v2(issuer);
     let native_token = native_sac.address();
 
-    client.initialize(&admin, &endpoint, &native_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
@@ -312,13 +311,13 @@ fn peer_change_cancelled_topic() {
 #[test]
 fn initialized_topic() {
     let s = setup();
-    // `initialize` ran inside `setup`; re-run it on a fresh contract so the
+    // The constructor ran inside `setup`; deploy a fresh contract so the
     // event is the latest invocation's output.
-    let id = s.env.register(Perihelion, ());
-    let client = PerihelionClient::new(&s.env, &id);
     let admin = Address::generate(&s.env);
     let endpoint = s.env.register(EventSpecMockEndpoint, ());
-    client.initialize(&admin, &endpoint, &s.native_token);
+    let _id = s
+        .env
+        .register(Perihelion, (&admin, &endpoint, &s.native_token));
     assert_event_shape(&s.env, "initialized", 1);
 }
 
