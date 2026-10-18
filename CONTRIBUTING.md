@@ -71,7 +71,7 @@ results that differ from CI for reasons unrelated to your change.
 
 | Toolchain | Version                                            | Pinned in                                        |
 | --------- | -------------------------------------------------- | ------------------------------------------------ |
-| Rust      | `1.85.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
+| Rust      | `1.88.0` (target `wasm32-unknown-unknown`)         | [rust-toolchain.toml](./rust-toolchain.toml)      |
 | Foundry   | `stable`                                           | `FOUNDRY_VERSION` in each Foundry workflow        |
 | Node.js   | see [.nvmrc](./.nvmrc)                             | [.nvmrc](./.nvmrc)                                |
 

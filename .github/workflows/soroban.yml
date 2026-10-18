@@ -74,6 +74,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Fails a Cargo.lock update (e.g. from Dependabot) that pulls in a crate
+      # whose MSRV is newer than rust-toolchain.toml, with a clear step name.
+      - name: Cargo.lock builds on the pinned toolchain
+        run: cargo check --workspace --locked
+
       - name: Format check
         run: cargo fmt --all --check
 
