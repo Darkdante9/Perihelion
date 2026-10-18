@@ -153,11 +153,14 @@ jobs:
         run: |
           PROPTEST_CASES=10000 cargo test fuzz -- --test-threads=1 --nocapture
 
+      # Generated corpus lives under the (git-ignored) Cargo target dir so a
+      # plain `cargo test` never dirties the tracked fixture directory (#871).
       - name: Upload fuzz corpus
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: soroban-fuzz-corpus
-          path: contracts/shared/wire-vectors/fuzz-corpus/
+          path: contracts/soroban/target/fuzz-corpus/
+          if-no-files-found: error
 
       - name: Upload fuzz failures
         if: failure()
@@ -177,7 +180,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: soroban-fuzz-corpus
-          path: contracts/shared/wire-vectors/fuzz-corpus/
+          path: contracts/soroban/target/fuzz-corpus/
 
       - name: Read pinned Rust toolchain
         id: toolchain
@@ -213,6 +216,9 @@ jobs:
 
       - name: Validate Rust-generated payloads with Solidity decoder
         working-directory: contracts/evm
+        env:
+          # Point CrossValidate.t.sol at the freshly generated corpus.
+          FUZZ_CORPUS_DIR: ${{ github.workspace }}/contracts/soroban/target/fuzz-corpus
         run: |
           # Run a custom test that reads corpus files and validates them
           forge test --match-test testCrossValidateCorpus -vv
