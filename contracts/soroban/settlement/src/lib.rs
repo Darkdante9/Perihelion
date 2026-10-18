@@ -31,6 +31,9 @@ mod fuzz;
 #[cfg(test)]
 mod event_shape_spec;
 
+#[cfg(test)]
+mod ttl_archival;
+
 pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
@@ -1030,11 +1033,10 @@ impl Perihelion {
         if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
-        if let Some(ref pref) = rec.preferred_solver {
-            if pref != solver && now < rec.reservation_expires {
-                return Err(PerihelionError::ReservedForSolver);
-            }
-        }
+        // `preferredSolver` is an EVM address and cannot be compared to a
+        // Soroban `Address`. Reservations are therefore enforced only by the
+        // EVM escrow at lock time; Stellar intentionally remains open to any
+        // solver after the intent is registered.
         if fill_amount <= 0 {
             return Err(PerihelionError::InvalidAmount);
         }
@@ -1131,6 +1133,19 @@ impl Perihelion {
 
         if rec.status != IntentStatus::Filled {
             return Err(PerihelionError::AlreadyFilled);
+        }
+
+        // The EVM escrow may open its local refund at deadline plus its
+        // configured confirmation grace, whose protocol minimum is 30 minutes.
+        // Refuse a Stellar dispatch after that earliest possible refund boundary;
+        // otherwise the user could be refunded on EVM and then receive a late
+        // FillConfirmed message for the same intent.
+        if env
+            .ledger()
+            .timestamp()
+            > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW)
+        {
+            return Err(PerihelionError::IntentExpired);
         }
 
         let solver = rec.solver.clone().ok_or(PerihelionError::IntentNotFound)?;
@@ -1987,14 +2002,11 @@ impl Perihelion {
             dest_asset: fi.dest_asset,
             min_dest_amount: fi.min_dest_amount,
             deadline: fi.deadline,
-            preferred_solver: fi.preferred_solver,
-            reservation_expires: if fi.reservation_window > 0 {
-                env.ledger()
-                    .timestamp()
-                    .saturating_add(fi.reservation_window)
-            } else {
-                fi.deadline
-            },
+            // The wire fields are retained for layout compatibility, but the
+            // EVM solver identity is not a Stellar address. Do not populate
+            // dead Soroban reservation state from an unrepresentable value.
+            preferred_solver: None,
+            reservation_expires: 0,
             status: IntentStatus::Locked,
             solver: None,
             solver_evm: None,

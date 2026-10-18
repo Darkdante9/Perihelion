@@ -211,7 +211,7 @@ pub fn decode_message(
             };
             Ok((msg_type, dummy, Some(ci)))
         }
-        _ => Err(PerihelionError::MalformedPayload),
+        _ => Err(PerihelionError::UnknownMessageType),
     }
 }
 
@@ -307,9 +307,10 @@ fn decode_fill_instruction(
     // preferred_solver occupies offset 187, 32 bytes.
     // The EVM side writes a 20-byte EVM address left-padded to 32 bytes — this
     // is not a valid Stellar strkey, and cannot be decoded as a Soroban Address.
-    // For now, preferred_solver is omitted from the decoded struct; an all-zero
-    // slot already means "open" (no reservation). Cross-chain preferred-solver
-    // semantics are a follow-up to #271.
+    // preferred_solver is intentionally omitted from the decoded struct: an
+    // EVM address cannot be represented as a Soroban Address. Reservations are
+    // enforced at the EVM lock boundary only; the all-zero Stellar value means
+    // open competition after registration.
     let preferred_solver = None;
 
     Ok(FillInstruction {

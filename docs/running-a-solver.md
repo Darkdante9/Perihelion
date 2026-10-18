@@ -97,6 +97,15 @@ cp solver/.env.example solver/.env
 | `PERIHELION_METRICS_HOST` | `127.0.0.1` | Bind address for `/metrics` — see [Network exposure](#network-exposure) before widening |
 | `PERIHELION_METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>` |
 
+### Split-fill dispatch deadline
+
+After `deliver_intent` marks an intent filled, the solver must dispatch
+`FillConfirmed` no later than `deadline + 30 minutes`. The Soroban settlement
+contract rejects later dispatches because the EVM escrow permits its local
+refund fallback from the protocol's minimum `confirmationGrace` boundary.
+Treat this as a hard monitoring deadline: a late dispatch is futile and must not
+be retried as if it could still release the escrow.
+
 ### Customization Points
 
 For production use, you likely need to customize:

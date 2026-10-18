@@ -19,12 +19,9 @@ pub enum PerihelionError {
     ContractPaused = 102,
 
     // --- Authorization ---
-    /// Caller is not the configured endpoint.
-    NotEndpoint = 130,
-    /// Caller is not the admin.
-    NotAdmin = 131,
-    /// Intent reserved for a different preferred solver.
-    ReservedForSolver = 132,
+    // Endpoint and admin authorization failures are emitted by Soroban's
+    // `require_auth` mechanism rather than this contract error enum. They are
+    // intentionally not duplicated as unreachable ABI variants.
     /// Caller is not the pending admin nominee (accept_admin guard).
     NotPendingAdmin = 133,
     /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).

@@ -444,20 +444,6 @@ fn rejects_fill_of_unknown_intent() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #132)")] // ReservedForSolver
-fn rejects_fill_by_non_preferred_solver() {
-    let s = setup();
-    let recipient = Address::generate(&s.env);
-    let preferred = Address::generate(&s.env);
-    let solver = Address::generate(&s.env);
-    s.asset_admin.mint(&solver, &1_000_000);
-    let h = hash(&s.env, 7);
-    register_intent(&s, &h, &recipient, 1, 5_000, 1, Some(preferred));
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.fill_intent(&solver, &evm, &h, &100, &0);
-}
-
-#[test]
 #[should_panic(expected = "Error(Contract, #163)")] // UntrustedPeer
 fn rejects_message_from_untrusted_peer() {
     let s = setup();
@@ -2562,28 +2548,6 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
         assert_parity(&h, 0, PerihelionError::InvalidAmount, "zero amount");
     }
 
-    // Test 5: reserved for another solver
-    {
-        let h = hash(&s.env, 205);
-        let preferred = Address::generate(&s.env);
-        register_intent_with_window(
-            &s,
-            &h,
-            &recipient,
-            100_000,
-            5_000,
-            5,
-            Some(preferred),
-            1_000,
-        );
-
-        assert_parity(
-            &h,
-            250_000,
-            PerihelionError::ReservedForSolver,
-            "reserved for solver",
-        );
-    }
 }
 
 // --- Rolling-window accessors (issue #680) -----------------------------------

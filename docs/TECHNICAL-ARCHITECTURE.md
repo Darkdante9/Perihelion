@@ -131,11 +131,13 @@ exceed worst-case cross-chain latency (LayerZero relay + Stellar finality). A
 `cancelExpired` call that lands before the grace window opens reverts with
 `DeadlineNotPassed()`.
 
-**Soroban preferred-solver reservation:**
-If an intent has a `preferred_solver`, only that solver may fill during the
-`reservation_window` seconds after `FillInstruction` is received. After the
-window lapses (`reservation_expires`), any solver may fill — preventing a
-preferred solver from indefinitely blocking settlement.
+**Preferred-solver reservation is EVM-lock-only:**
+The EVM escrow enforces `preferredSolver` when the user locks funds. The
+wire-format words remain reserved for compatibility, but an EVM address cannot
+be represented as a Soroban `Address`; the Stellar settlement contract drops
+the value, keeps `reservation_window` at zero, and allows any solver to fill
+after registration. Cross-chain solver identity requires a future explicit
+mapping and must not be inferred from the current payload.
 
 ### Nonce-degradation path
 
