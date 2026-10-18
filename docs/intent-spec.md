@@ -66,10 +66,13 @@ bounding the per-intent storage TTL on Stellar.
 **`preferredSolver` controls solver reservation on the EVM source chain only.**
 When an intent bridges to Stellar, the solver reservation does not carry over —
 the Soroban settlement contract cannot represent an EVM address as a Stellar
-address, so any `preferredSolver` value is silently dropped on Stellar. Users who
-set `preferredSolver` on the EVM side get no reservation protection if the intent
-settles through cross-chain settlement. Cross-chain solver identity and
-reservation is tracked as a follow-up to issue #271.
+address, so any `preferredSolver` value is deliberately dropped on Stellar. The
+wire field remains reserved for compatibility and `reservation_window` is zero;
+the Stellar record does not populate or enforce a reservation. Users who set
+`preferredSolver` on the EVM side receive protection only at the EVM `lock`
+entrypoint, and any solver may fill after the intent is registered on Stellar.
+Cross-chain solver identity and reservation is tracked as a follow-up to issue
+#271.
 
 ## Amount Field Specification
 
