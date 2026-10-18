@@ -2981,3 +2981,53 @@ fn prune_bumps_instance_ttl_once_inside_threshold() {
         .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
     assert_eq!(after, INSTANCE_TTL_EXTEND);
 }
+
+// --- Issue #913: an underfunded reserve must not revert the dispatch ---------
+
+#[test]
+fn dispatch_with_empty_reserve_still_confirms_and_skips_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s
+        .client
+        .native_token()
+        .expect("native_token should be configured");
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+
+    // A reward is configured, but the contract holds no native token to pay it.
+    let reward_amount = 80_000i128;
+    s.client.set_dispatch_keeper_reward(&reward_amount);
+    assert_eq!(native_client.balance(&s.client.address), 0);
+
+    let h = hash(&s.env, 0xE4);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+    // Collect events before further reads that would reset the log.
+    let events = s.env.events().all();
+
+    // The confirmation still goes out and the marker is set...
+    assert_eq!(s.mock.sent(), 1, "FillConfirmed must be dispatched");
+    assert_eq!(
+        s.client.status(&h),
+        Some(IntentStatus::ConfirmationSent),
+        "intent must reach ConfirmationSent despite the empty reserve"
+    );
+    // ...and the keeper is not paid, but the gap is observable.
+    assert_eq!(native_client.balance(&keeper), 0);
+    let expected = Symbol::new(&s.env, "keeper_reward_skipped");
+    let found = events.iter().any(|(_, topics, _)| {
+        topics.iter().any(|t| {
+            Symbol::try_from_val(&s.env, &t)
+                .map(|sym| sym == expected)
+                .unwrap_or(false)
+        })
+    });
+    assert!(found, "keeper_reward_skipped event not emitted");
+}

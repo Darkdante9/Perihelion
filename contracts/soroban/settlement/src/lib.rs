@@ -1239,32 +1239,47 @@ impl Perihelion {
         // third-party keeper who covered the LayerZero fee to push a stalled
         // FillConfirmed through, making the permissionless dispatch path
         // economically self-sustaining rather than relying on altruism.
-        // The reward is paid after the dispatch is finalized so a failure here
-        // does not roll back the confirmation.
+        // Soroban invocations are atomic: a failed transfer would revert the whole
+        // call, rolling back the FillConfirmed dispatch and the ConfirmationSent
+        // marker (issue #913). So the reward is paid only when the contract's
+        // native-token reserve covers it. Otherwise the reward is skipped with an
+        // observable event, and the confirmation still goes out.
         let dispatch_reward: i128 = env
             .storage()
             .instance()
             .get(&DataKey::DispatchKeeperReward)
             .unwrap_or(0);
         if dispatch_reward > 0 {
-            if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
-                token::TokenClient::new(&env, &native_token).transfer(
-                    &env.current_contract_address(),
-                    &caller,
-                    &dispatch_reward,
-                );
-                env.events().publish(
-                    (events::keeper_reward_paid(&env), intent_hash.clone()),
-                    (caller.clone(), dispatch_reward),
-                );
-            } else {
-                // native_token not yet configured: skip the reward and emit a
-                // skipped event so the gap is observable off-chain, matching
-                // the cancel_expired_intent behaviour.
-                env.events().publish(
-                    (events::keeper_reward_skipped(&env), intent_hash.clone()),
-                    (caller.clone(), dispatch_reward),
-                );
+            match env
+                .storage()
+                .instance()
+                .get::<_, Address>(&DataKey::NativeToken)
+            {
+                Some(native_token) => {
+                    let token = token::TokenClient::new(&env, &native_token);
+                    if token.balance(&env.current_contract_address()) >= dispatch_reward {
+                        token.transfer(&env.current_contract_address(), &caller, &dispatch_reward);
+                        env.events().publish(
+                            (events::keeper_reward_paid(&env), intent_hash.clone()),
+                            (caller.clone(), dispatch_reward),
+                        );
+                    } else {
+                        // Reserve underfunded: skip rather than revert the dispatch.
+                        env.events().publish(
+                            (events::keeper_reward_skipped(&env), intent_hash.clone()),
+                            (caller.clone(), dispatch_reward),
+                        );
+                    }
+                }
+                None => {
+                    // native_token not yet configured: skip the reward and emit a
+                    // skipped event so the gap is observable off-chain, matching
+                    // the cancel_expired_intent behaviour.
+                    env.events().publish(
+                        (events::keeper_reward_skipped(&env), intent_hash.clone()),
+                        (caller.clone(), dispatch_reward),
+                    );
+                }
             }
         }
 
