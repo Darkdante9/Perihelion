@@ -101,7 +101,11 @@ proptest! {
         );
 
         // Assert layout: version(1) | type(1) | hash(32) | solver(32) | amount(16) | ledger(8)
-        assert_eq!(encoded.len(), 90, "FillConfirmed must be 90 bytes");
+        assert_eq!(
+            encoded.len(),
+            FILL_CONFIRMED_LENGTH,
+            "FillConfirmed must use its shared wire width"
+        );
         assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION);
         assert_eq!(encoded.get(1).unwrap(), MSG_FILL_CONFIRMED);
 
@@ -159,7 +163,7 @@ proptest! {
         // The Rust encoder does not validate solver_evm high bits (it's a pass-through).
         // The rejection happens on the Solidity decode side — this test ensures
         // we generate the adversarial case for cross-validation.
-        assert_eq!(encoded.len(), 90);
+        assert_eq!(encoded.len(), FILL_CONFIRMED_LENGTH);
     }
 }
 
@@ -205,6 +209,7 @@ fn fill_instruction_matches_golden_vector() {
         // encode_fill_instruction writes [0u8; 32] for preferred_solver regardless
         // of this field — "open" (no reservation) is the canonical wire value.
         preferred_solver: None,
+            locked_solver: None,
         reservation_window: 0,
     };
     let encoded = crate::messages::encode_fill_instruction(&env, &fi);
@@ -325,7 +330,7 @@ proptest! {
         let encoded = encode_cancel_intent(&env, &intent_hash_bytes, reason);
 
         // Assert layout: version(1) | type(1) | hash(32) | reason(1)
-        assert_eq!(encoded.len(), 35, "CancelIntent must be 35 bytes");
+        assert_eq!(encoded.len(), CANCEL_INTENT_LENGTH, "CancelIntent must be 35 bytes");
         assert_eq!(encoded.get(0).unwrap(), PROTOCOL_VERSION);
         assert_eq!(encoded.get(1).unwrap(), MSG_CANCEL_INTENT);
 
@@ -358,7 +363,7 @@ proptest! {
         encoded.append(&Bytes::from_array(&env, &intent_hash));
         encoded.push_back(bad_reason);
 
-        assert_eq!(encoded.len(), 35);
+        assert_eq!(encoded.len(), CANCEL_INTENT_LENGTH);
         export_to_corpus("cancel_intent_bad_reason", &encoded);
 
         // Verify the Rust decoder also rejects the bad reason code.
@@ -450,8 +455,8 @@ mod tests {
         let bytes = decode_hex(SHORT);
         assert_eq!(
             bytes.len(),
-            226,
-            "fill_instruction_short.hex must be 226 bytes"
+            FILL_INSTRUCTION_LENGTH as usize - 1,
+            "fill_instruction_short.hex must be one byte shorter than FILL_INSTRUCTION_LENGTH"
         );
         let mut payload = Bytes::new(&env);
         for b in bytes {
@@ -471,7 +476,7 @@ mod tests {
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_version.hex");
         let env = Env::default();
         let bytes = decode_hex(BAD_VERSION);
-        assert_eq!(bytes.len(), 227);
+        assert_eq!(bytes.len(), FILL_INSTRUCTION_LENGTH as usize);
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);
@@ -488,7 +493,7 @@ mod tests {
             include_str!("../../../shared/wire-vectors/neg/fill_instruction_bad_type.hex");
         let env = Env::default();
         let bytes = decode_hex(BAD_TYPE);
-        assert_eq!(bytes.len(), 227);
+        assert_eq!(bytes.len(), FILL_INSTRUCTION_LENGTH as usize);
         let mut payload = Bytes::new(&env);
         for b in bytes {
             payload.push_back(b);
@@ -507,8 +512,8 @@ mod tests {
         let bytes = decode_hex(LONG);
         assert_eq!(
             bytes.len(),
-            228,
-            "fill_instruction_long.hex must be 228 bytes"
+            FILL_INSTRUCTION_LENGTH as usize + 1,
+            "fill_instruction_long.hex must be one byte longer than FILL_INSTRUCTION_LENGTH"
         );
         let mut payload = Bytes::new(&env);
         for b in bytes {

@@ -968,6 +968,7 @@ impl Perihelion {
     /// `LzMessage`, use [`Self::lz_receive_bytes`], which decodes those bytes with
     /// the same codec the differential-fuzz harness exercises and then dispatches
     /// through the same `apply_inbound` path.
+    #[cfg(any(test, feature = "typed-inbound"))]
     pub fn lz_receive(
         env: Env,
         origin: Origin,
@@ -1005,6 +1006,12 @@ impl Perihelion {
         let (msg_type, fill_instruction, cancel_instruction) =
             messages::decode_message(&env, &message)?;
         let parsed = if msg_type == MSG_FILL_INSTRUCTION {
+            // A release build accepts only canonical EVM-originated bytes. The
+            // solver word binds this registration to the exact source-chain
+            // locking key; zero is reserved for typed test fixtures only.
+            if fill_instruction.locked_solver.is_none() {
+                return Err(PerihelionError::MalformedPayload);
+            }
             LzMessage::FillInstruction(fill_instruction)
         } else {
             // `decode_message` only ever returns MSG_FILL_INSTRUCTION or
@@ -1024,6 +1031,7 @@ impl Perihelion {
     fn validate_and_stage_fill(
         env: &Env,
         solver: &Address,
+        solver_evm: &BytesN<32>,
         intent_hash: &BytesN<32>,
         fill_amount: i128,
     ) -> Result<(DataKey, IntentRecord), PerihelionError> {
@@ -1046,10 +1054,19 @@ impl Perihelion {
         if now.saturating_add(MIN_DISPATCH_WINDOW) > rec.deadline {
             return Err(PerihelionError::IntentExpired);
         }
-        // `preferredSolver` is an EVM address and cannot be compared to a
-        // Soroban `Address`. Reservations are therefore enforced only by the
-        // EVM escrow at lock time; Stellar intentionally remains open to any
-        // solver after the intent is registered.
+        if let Some(ref pref) = rec.preferred_solver {
+            if pref != solver && now < rec.reservation_expires {
+                return Err(PerihelionError::ReservedForSolver);
+            }
+        }
+        // The source escrow identity is authoritative during the reservation
+        // window. Once it expires, another solver may fill and receive the
+        // confirmation payout before the source refund grace period closes.
+        if let Some(ref locked_solver) = rec.solver_evm {
+            if locked_solver != solver_evm && now < rec.reservation_expires {
+                return Err(PerihelionError::ReservedForSolver);
+            }
+        }
         if fill_amount <= 0 {
             return Err(PerihelionError::InvalidAmount);
         }
@@ -1075,7 +1092,7 @@ impl Perihelion {
         Self::require_not_paused(&env)?;
 
         let (key, mut rec) =
-            Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
+            Self::validate_and_stage_fill(&env, &solver, &solver_evm, &intent_hash, fill_amount)?;
 
         // Effects before interactions: flip status, write the settled marker.
         rec.status = IntentStatus::Filled;
@@ -1245,7 +1262,7 @@ impl Perihelion {
         Self::require_not_paused(&env)?;
 
         let (key, mut rec) =
-            Self::validate_and_stage_fill(&env, &solver, &intent_hash, fill_amount)?;
+            Self::validate_and_stage_fill(&env, &solver, &solver_evm, &intent_hash, fill_amount)?;
 
         // Idempotency marker written before the outbound dispatch.
         env.storage()
@@ -1593,6 +1610,8 @@ impl Perihelion {
             dst_eid,
             receiver,
             message,
+            options: soroban_sdk::Bytes::new(&env),
+            pay_in_lz_token: false,
         };
         Ok(EndpointClient::new(&env, &endpoint).quote(&params))
     }
@@ -1603,7 +1622,8 @@ impl Perihelion {
         env: Env,
         dst_eid: u32,
     ) -> Result<i128, PerihelionError> {
-        let dummy_message = soroban_sdk::Bytes::from_slice(&env, &[0u8; 90]);
+        let dummy_message =
+            soroban_sdk::Bytes::from_slice(&env, &[0u8; FILL_CONFIRMED_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)
     }
 
@@ -1613,7 +1633,8 @@ impl Perihelion {
         env: Env,
         dst_eid: u32,
     ) -> Result<i128, PerihelionError> {
-        let dummy_message = soroban_sdk::Bytes::from_slice(&env, &[0u8; 35]);
+        let dummy_message =
+            soroban_sdk::Bytes::from_slice(&env, &[0u8; CANCEL_INTENT_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)
     }
 
@@ -2015,14 +2036,21 @@ impl Perihelion {
             dest_asset: fi.dest_asset,
             min_dest_amount: fi.min_dest_amount,
             deadline: fi.deadline,
-            // The wire fields are retained for layout compatibility, but the
-            // EVM solver identity is not a Stellar address. Do not populate
-            // dead Soroban reservation state from an unrepresentable value.
-            preferred_solver: None,
-            reservation_expires: 0,
+            preferred_solver: fi.preferred_solver,
+            // The reservation is bounded by the intent deadline. After this
+            // window expires, another solver may fill; the source escrow's
+            // confirmation grace period still protects the refund race.
+            reservation_expires: if fi.reservation_window > 0 {
+                env.ledger()
+                    .timestamp()
+                    .saturating_add(fi.reservation_window)
+                    .min(fi.deadline)
+            } else {
+                fi.deadline
+            },
             status: IntentStatus::Locked,
             solver: None,
-            solver_evm: None,
+            solver_evm: fi.locked_solver,
             fill_amount: 0,
             fill_ledger: 0,
         };
@@ -2167,6 +2195,8 @@ impl Perihelion {
             dst_eid,
             receiver,
             message,
+            options: soroban_sdk::Bytes::new(env),
+            pay_in_lz_token: false,
         };
         // Pre-check: quote the required fee and reject early if underpaid.
         // This surfaces fee estimation failures as InsufficientLzFee rather

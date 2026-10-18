@@ -5,7 +5,8 @@ import { IERC20 } from "./IERC20.sol";
 import {
     Origin,
     MessagingParams,
-    ILayerZeroEndpoint,
+    MessagingReceipt,
+    ILayerZeroEndpointV2,
     ILayerZeroReceiver
 } from "./interfaces/ILayerZero.sol";
 
@@ -63,7 +64,9 @@ import {
 contract PerihelionEscrow is ILayerZeroReceiver {
     // --- Types ---------------------------------------------------------------
 
-    uint256 internal constant FILL_INSTRUCTION_LENGTH = 227;
+    uint256 public constant FILL_INSTRUCTION_LENGTH = 227;
+    uint256 public constant FILL_CONFIRMED_LENGTH = 90;
+    uint256 public constant CANCEL_INTENT_LENGTH = 35;
 
     struct Intent {
         address user;
@@ -86,6 +89,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     }
 
     struct Lock {
+        /// @dev Canonical EVM solver identity bound at lock time. The same identity
+        ///      must be carried by FillConfirmed; payout aliases cannot bypass it.
         address solver;
         address user;
         address asset;
@@ -167,7 +172,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         Domain: name="Perihelion", version="1", chainId=<deployment chain>, verifyingContract=<this>.
     bytes32 public immutable DOMAIN_SEPARATOR;
     /// @notice Trusted LayerZero endpoint.
-    ILayerZeroEndpoint public immutable endpoint;
+    ILayerZeroEndpointV2 public immutable endpoint;
     /// @notice LayerZero endpoint id of the Stellar settlement contract.
     uint32 public immutable stellarEid;
 
@@ -406,7 +411,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @param _stellarEid LayerZero endpoint id for the Stellar settlement contract.
     constructor(address _endpoint, uint32 _stellarEid) {
         if (_endpoint == address(0)) revert ZeroAddress();
-        endpoint = ILayerZeroEndpoint(_endpoint);
+        endpoint = ILayerZeroEndpointV2(_endpoint);
+        endpoint.setDelegate(msg.sender);
         stellarEid = _stellarEid;
         owner = msg.sender;
         _reentrancy = 1; // 1/2/1 sentinel: slot stays non-zero, each lock/unlock is a warm SSTORE
@@ -753,20 +759,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         );
     }
 
-    /// @dev Quote, send the FillInstruction over LayerZero and refund any
-    ///      excess `msg.value` to the caller.
-    function _dispatchFillInstruction(bytes32 intentHash, Intent calldata intent) private {
-        bytes memory message = _encodeFillInstruction(intentHash, intent);
+        bytes memory message = _encodeFillInstruction(intentHash, intent, msg.sender);
         // Quote with nativeFee=0, identical to quoteFee(), so the value a solver
         // sized off-chain via quoteFee is the same value compared against below.
-        MessagingParams memory params = _buildMessagingParams(message, 0);
+        MessagingParams memory params = _buildMessagingParams(message);
         // Revert early on obvious underpayment rather than letting the endpoint
         // bubble an opaque error. Only the quoted fee is actually sent to the
         // endpoint; any excess is refunded locally to the caller.
         uint256 quoted = endpoint.quote(params, msg.sender).nativeFee;
         if (msg.value < quoted) revert FeeTooLow();
         uint256 refundAmount = msg.value - quoted;
-        endpoint.send{ value: quoted }(params, msg.sender);
+        MessagingReceipt memory receipt = endpoint.send{ value: quoted }(params, msg.sender);
+        // Touch every V2 receipt field so ABI decoding is explicit and future
+        // endpoint upgrades cannot silently fall back to the legacy bytes32 ABI.
+        receipt.guid; receipt.nonce; receipt.fee.nativeFee; receipt.fee.lzTokenFee;
         if (refundAmount > 0) {
             (bool ok,) = msg.sender.call{ value: refundAmount }("");
             if (!ok) revert NativeTransferFailed();
@@ -866,27 +872,22 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         }
     }
 
-    /// @dev Release destination is `solverEvm` from the Stellar FillConfirmed message,
-    ///      NOT `l.solver` (the address that called `lock` on the source chain). This is
-    ///      intentional: solvers may operate a hot locking key on EVM and a separate cold
-    ///      payout address, supplying the payout address as `solver_evm` in `fill_intent`
-    ///      on Stellar. The two addresses can legitimately differ. Solver tooling MUST
-    ///      surface both addresses explicitly so operators understand which key receives
-    ///      the payout. The on-chain check that prevents theft is the LayerZero peer
-    ///      authentication in `lzReceive` — only the trusted Stellar peer can supply
-    ///      `solverEvm`, so an attacker cannot redirect funds to an arbitrary address.
+    /// @dev `solverEvm` is the canonical solver identity carried by the FillInstruction
+    ///      that was locked on the source chain. It must match the locking solver
+    ///      during the lock's exclusivity window; after the deadline, another solver
+    ///      may complete the fill before the confirmation grace period expires.
     function _onFillConfirmed(bytes calldata message) internal {
         (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
             _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
-        if (l.user == address(0)) {
-            emit FillConfirmedIgnored(intentHash, IGNORE_UNKNOWN_LOCK);
-            return;
+        if (l.user == address(0)) revert NotLocked();
+        // Exclusivity invariant: before expiry, only the EVM address that called
+        // lock may receive the release. After expiry, the reservation is open to
+        // another solver until cancelExpired reaches the confirmation-grace edge.
+        if (solverEvm != l.solver && block.timestamp < l.deadline) {
+            revert ReservedForSolver();
         }
-        if (l.released || l.refunded) {
-            emit FillConfirmedIgnored(intentHash, IGNORE_ALREADY_FINALIZED);
-            return;
-        }
+        if (l.released || l.refunded) revert AlreadyFinalized();
         if (fillAmount < l.minDestAmount) revert UnderDelivered();
 
         l.released = true; // effect before interaction (race guard)
@@ -973,8 +974,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @return nativeFee Estimated native token fee in wei.
     function quoteFee(Intent calldata intent, address payer) public view returns (uint256 nativeFee) {
         // Use a placeholder hash — the fee depends only on message size, not content.
-        bytes memory message = _encodeFillInstruction(bytes32(0), intent);
-        MessagingParams memory params = _buildMessagingParams(message, 0);
+        bytes memory message = _encodeFillInstruction(bytes32(0), intent, payer);
+        MessagingParams memory params = _buildMessagingParams(message);
         return endpoint.quote(params, payer).nativeFee;
     }
 
@@ -1038,10 +1039,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Internal: codec -----------------------------------------------------
 
+    /// @dev Official LayerZero V2 Type-3 executor option for lzReceive.
+    ///      The option is part of both quote and send, avoiding underquoted
+    ///      messages that the executor cannot deliver.
+    function _lzReceiveOptions() internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            bytes2(0x0003), bytes1(0x01), bytes1(0x01), bytes2(0x0011),
+            uint128(300_000), uint128(0)
+        );
+    }
+
     /// @dev Build MessagingParams for a FillInstruction message. Both lock and quoteFee
-    ///      call this with nativeFee=0, so the two quote identically and the value a
+    ///      use the same options and payInLzToken=false, so the two quote identically and the value a
     ///      solver sizes via quoteFee is the value lock actually compares msg.value against.
-    function _buildMessagingParams(bytes memory message, uint256 nativeFee)
+    function _buildMessagingParams(bytes memory message)
         internal
         view
         returns (MessagingParams memory)
@@ -1050,7 +1061,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             dstEid: stellarEid,
             receiver: stellarPeer,
             message: message,
-            nativeFee: nativeFee
+            options: _lzReceiveOptions(),
+            payInLzToken: false
         });
     }
 
@@ -1071,7 +1083,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      signals "open" (no preferred solver) on the Soroban side.
     function _encodeFillInstruction(
         bytes32 intentHash,
-        Intent calldata intent
+        Intent calldata intent,
+        address lockingSolver
     )
         internal
         view
@@ -1095,8 +1108,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             destAssetField[i] = destAssetBytes[i];
         }
 
-        // Encode preferredSolver: EVM address left-padded to 32 bytes (zeros = open).
-        bytes32 solverWord = bytes32(uint256(uint160(intent.preferredSolver)));
+        // Encode the canonical locking solver, not the user preference. This field
+        // is the cross-chain exclusivity binding and is never an alias/payout field.
+        bytes32 solverWord = bytes32(uint256(uint160(lockingSolver)));
 
         return abi.encodePacked(
             PROTOCOL_VERSION,     // 1  byte  offset 0
@@ -1134,7 +1148,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         pure
         returns (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger)
     {
-        if (m.length != 90) {
+        if (m.length != FILL_CONFIRMED_LENGTH) {
             revert MalformedPayload();
         }
         bytes32 hashWord;
@@ -1169,7 +1183,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         pure
         returns (bytes32 intentHash, uint8 reason)
     {
-        if (m.length != 35) revert MalformedPayload();
+        if (m.length != CANCEL_INTENT_LENGTH) revert MalformedPayload();
         bytes32 hashWord;
         assembly {
             hashWord := calldataload(add(m.offset, 2))

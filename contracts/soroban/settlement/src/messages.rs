@@ -32,7 +32,7 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::types::{
     CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
-    CANCEL_REASON_INVALID, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
+    CANCEL_REASON_INVALID, CANCEL_INTENT_LENGTH, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
     MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
@@ -68,7 +68,7 @@ pub(crate) fn address_from_contract_id(env: &Env, id: [u8; 32]) -> Address {
     Address::from_str(env, strkey_str)
 }
 
-/// Encode a `FillConfirmed` payload (90 bytes):
+/// Encode a `FillConfirmed` payload (FILL_CONFIRMED_LENGTH bytes):
 /// `version(1) | type(1) | intent_hash(32) | solver_evm(32) | amount(16) | ledger(8)`.
 ///
 /// ## Field authority
@@ -133,7 +133,7 @@ pub fn encode_fill_confirmed(
     b
 }
 
-/// Encode a `CancelIntent` payload (35 bytes):
+/// Encode a `CancelIntent` payload (CANCEL_INTENT_LENGTH bytes):
 /// `version(1) | type(1) | intent_hash(32) | reason(1)`.
 pub fn encode_cancel_intent(env: &Env, intent_hash: &BytesN<32>, reason: u8) -> Bytes {
     let mut b = Bytes::new(env);
@@ -207,6 +207,7 @@ pub fn decode_message(
                 min_dest_amount: 0,
                 deadline: 0,
                 preferred_solver: None,
+                locked_solver: None,
                 reservation_window: 0,
             };
             Ok((msg_type, dummy, Some(ci)))
@@ -215,9 +216,8 @@ pub fn decode_message(
     }
 }
 
-/// Decode a `FillInstruction` payload (227 bytes, or 219 for the legacy layout
-/// without the trailing `reservation_window`):
-/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | preferred_solver(32) [| reservation_window(8)]`.
+/// Decode the canonical `FillInstruction` payload (227 bytes):
+/// `version(1) | type(1) | intent_hash(32) | src_eid(4) | recipient(56) | dest_asset(69) | min_dest_amount(16) | deadline(8) | locked_solver(32) | reservation_window(8)`.
 ///
 /// # Address decoding
 ///
@@ -228,14 +228,15 @@ pub fn decode_message(
 /// must not decode an asset identifier as a Soroban `Address`. The recipient
 /// remains a Soroban `Address` and is decoded from its 56-byte strkey field.
 ///
-/// # preferred_solver
+/// # solver identity and preferred solver
 ///
-/// The EVM side encodes `preferredSolver` as a 20-byte EVM address left-padded
-/// to 32 bytes. This is not a Stellar strkey and cannot be decoded as a Soroban
-/// `Address`. The field is therefore left as `None` — the preferred-solver
-/// reservation mechanism for cross-chain intents requires a dedicated design
-/// (tracked as a follow-up to #271). The trailing `reservation_window` field is
-/// explicit on the wire and is decoded as a big-endian `u64`.
+/// The EVM side encodes the canonical locking solver as a 20-byte EVM address
+/// left-padded to 32 bytes. This is not a Stellar strkey and cannot be decoded
+/// as a Soroban `Address`, so it is preserved as `locked_solver` and must be
+/// echoed by the solver in `fill_intent`. The separate user `preferredSolver`
+/// reservation remains unset by this adapter until its cross-chain representation
+/// is specified. The trailing `reservation_window` field is explicit on the wire
+/// and is decoded as a big-endian `u64`.
 ///
 fn decode_fill_instruction(
     env: &Env,
@@ -243,14 +244,9 @@ fn decode_fill_instruction(
 ) -> Result<FillInstruction, crate::PerihelionError> {
     use crate::PerihelionError;
 
-    // Accept the canonical 227-byte layout (which includes the explicit
-    // `reservation_window` field) and the legacy 219-byte layout (which ends
-    // after `preferred_solver` and omits it). Intermediate widths stay rejected:
-    // the negative vectors pin one-byte-short (226) and one-byte-long (228)
-    // payloads as malformed.
-    if message.len() != FILL_INSTRUCTION_LENGTH
-        && message.len() != FILL_INSTRUCTION_LENGTH - 8
-    {
+    // Release delivery accepts only the canonical fixed-width payload. The
+    // historical 219-byte layout is intentionally not a production decode path.
+    if message.len() != FILL_INSTRUCTION_LENGTH {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -304,14 +300,15 @@ fn decode_fill_instruction(
     }
     let deadline = u64::from_be_bytes(deadline_bytes);
 
-    // preferred_solver occupies offset 187, 32 bytes.
-    // The EVM side writes a 20-byte EVM address left-padded to 32 bytes — this
-    // is not a valid Stellar strkey, and cannot be decoded as a Soroban Address.
-    // preferred_solver is intentionally omitted from the decoded struct: an
-    // EVM address cannot be represented as a Soroban Address. Reservations are
-    // enforced at the EVM lock boundary only; the all-zero Stellar value means
-    // open competition after registration.
-    let preferred_solver = None;
+    // Offset 187 is the canonical 32-byte EVM identity of the solver that
+    // locked the source escrow. Preserve it verbatim; it is not a Stellar
+    // Address and must never be converted through strkey parsing.
+    let solver_word = read_field::<32>(message, 187)?;
+    let locked_solver = if solver_word == [0u8; 32] {
+        None
+    } else {
+        Some(BytesN::from_array(env, &solver_word))
+    };
 
     Ok(FillInstruction {
         intent_hash,
@@ -320,15 +317,10 @@ fn decode_fill_instruction(
         dest_asset,
         min_dest_amount,
         deadline,
-        preferred_solver,
-        reservation_window: if message.len() >= FILL_INSTRUCTION_LENGTH {
-            // Canonical 227-byte layout: read the explicit 8-byte field at offset 219.
-            u64::from_be_bytes(read_field::<8>(message, 219)?)
-        } else {
-            // Legacy 219-byte layout: the field is absent on the wire and means
-            // "no reservation window".
-            0
-        },
+        preferred_solver: None,
+        locked_solver,
+        // Canonical 227-byte layout: read the explicit 8-byte field at offset 219.
+        reservation_window: u64::from_be_bytes(read_field::<8>(message, 219)?),
     })
 }
 
@@ -398,7 +390,11 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
         &(fi.min_dest_amount as u128).to_be_bytes(),
     ));
     b.append(&Bytes::from_array(env, &fi.deadline.to_be_bytes()));
-    b.append(&Bytes::from_array(env, &[0u8; 32]));
+    if let Some(ref locked_solver) = fi.locked_solver {
+        b.append(&Bytes::from_array(env, &locked_solver.to_array()));
+    } else {
+        b.append(&Bytes::from_array(env, &[0u8; 32]));
+    }
     b.append(&Bytes::from_array(
         env,
         &fi.reservation_window.to_be_bytes(),
@@ -406,7 +402,7 @@ pub(crate) fn encode_fill_instruction(env: &Env, fi: &FillInstruction) -> Bytes 
     b
 }
 
-/// Decode a `CancelIntent` payload (35 bytes):
+/// Decode a `CancelIntent` payload (CANCEL_INTENT_LENGTH bytes):
 /// `version(1) | type(1) | intent_hash(32) | reason(1)`.
 fn decode_cancel_intent(
     env: &Env,
@@ -415,7 +411,7 @@ fn decode_cancel_intent(
     use crate::PerihelionError;
 
     // Validate length: 2 (header) + 33 (payload) = 35
-    if message.len() != 35 {
+    if message.len() != CANCEL_INTENT_LENGTH {
         return Err(PerihelionError::MalformedPayload);
     }
 
@@ -624,7 +620,7 @@ mod tests {
         for _ in 0..8u32 {
             msg.push_back(0);
         }
-        assert_eq!(msg.len(), 227);
+        assert_eq!(msg.len(), FILL_INSTRUCTION_LENGTH);
         assert!(decode_fill_instruction(&env, &msg).is_err());
     }
 }

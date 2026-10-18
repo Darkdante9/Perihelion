@@ -520,6 +520,7 @@ fn inbound_nonce_archival_resets_replay_protection() {
             min_dest_amount: 1,
             deadline: s.env.ledger().timestamp() + 1_000,
             preferred_solver: None,
+            locked_solver: None,
             reservation_window: 0,
         }),
     );

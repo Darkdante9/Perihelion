@@ -8,7 +8,8 @@ import {
     Origin,
     MessagingParams,
     MessagingFee,
-    ILayerZeroEndpoint
+    MessagingReceipt,
+    ILayerZeroEndpointV2
 } from "../src/interfaces/ILayerZero.sol";
 
 /// @dev Minimal mintable ERC-20 for tests.
@@ -197,7 +198,9 @@ contract ReleaseFalseReturningERC20 is IERC20 {
 
 /// @dev Records the last outbound LayerZero send and can replay inbound messages
 ///      back into the escrow as if it were the canonical endpoint.
-contract MockEndpoint is ILayerZeroEndpoint {
+contract MockEndpoint is ILayerZeroEndpointV2 {
+    function setDelegate(address) external {}
+
     uint32 public lastDstEid;
     bytes32 public lastReceiver;
     bytes public lastMessage;
@@ -217,15 +220,15 @@ contract MockEndpoint is ILayerZeroEndpoint {
     function send(MessagingParams calldata params, address refundAddress)
         external
         payable
-        returns (bytes32)
+        returns (MessagingReceipt memory receipt)
     {
         lastDstEid = params.dstEid;
         lastReceiver = params.receiver;
         lastMessage = params.message;
-        lastNativeFee = params.nativeFee;
+        lastNativeFee = msg.value;
         lastRefundAddress = refundAddress;
         sendCount++;
-        return bytes32(uint256(0xABCD));
+        return MessagingReceipt({ guid: bytes32(uint256(0xABCD)), nonce: 0, fee: MessagingFee({nativeFee: msg.value, lzTokenFee: 0}) });
     }
 
     function quote(MessagingParams calldata, address) external view returns (MessagingFee memory) {

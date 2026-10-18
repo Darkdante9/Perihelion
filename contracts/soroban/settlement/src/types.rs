@@ -12,6 +12,10 @@ pub const MSG_CANCEL_INTENT: u8 = 0x03;
 
 /// Fixed wire length of a FillInstruction payload.
 pub const FILL_INSTRUCTION_LENGTH: u32 = 227;
+/// Fixed wire length of FillConfirmed (version + type + hash + solver + amount + ledger).
+pub const FILL_CONFIRMED_LENGTH: u32 = 90;
+/// Fixed wire length of CancelIntent (version + type + hash + reason).
+pub const CANCEL_INTENT_LENGTH: u32 = 35;
 
 /// Cancellation reason codes carried in a CancelIntent message.
 pub const CANCEL_REASON_EXPIRED: u8 = 0x00;
@@ -114,13 +118,14 @@ pub enum DataKey {
     /// nonces it covered. TTL is extended to MAX_TTL on every write; see
     /// `accept_nonce` in lib.rs.
     InboundNonceWord(u32, u64),
-    /// Per-eid nonce low-water mark (issue #718): every nonce `n <`
-    /// `InboundNonceFloor(eid)` is fully consumed (its bit was set), so the
-    /// bitmap word covering it may be removed and `n` itself is rejected by the
-    /// floor check in `accept_nonce` — no bitmap lookup needed. Removing a
-    /// pruned word therefore cannot re-open any covered nonce to replay.
-    /// Raised only by `prune_nonce_words`, which deletes a word only after
-    /// verifying all 64 of its bits are set.
+    /// Per-eid nonce pruning floor (issue #718): every nonce `n <`
+    /// `InboundNonceFloor(eid)` is permanently rejected as already consumed.
+    /// The floor is the first nonce not covered by the fully-consumed words
+    /// pruned so far; it is not a claim that all higher nonces are consumed.
+    /// `prune_nonce_words` advances it only after verifying every bit in each
+    /// deleted 64-nonce word is set. Archiving/deleting bitmap words below the
+    /// floor therefore cannot reopen a replay; nonces at or above the floor
+    /// continue to use their bitmap word (or its implicit zero state).
     InboundNonceFloor(u32),
     /// Consumed nonce bitmap for a source endpoint id (unordered delivery).
     /// **Deprecated** — superseded by `InboundNonceWord(eid, word_index)` (issue #285).
@@ -227,6 +232,9 @@ pub struct FillInstruction {
     pub min_dest_amount: i128,
     pub deadline: u64,
     pub preferred_solver: Option<Address>,
+    /// EVM solver identity that locked the source escrow. Raw canonical
+    /// FillInstructions always carry this value; typed test messages may omit it.
+    pub locked_solver: Option<BytesN<32>>,
     /// Seconds from registration during which only the preferred solver may fill.
     /// After this window lapses, any solver may fill. Zero means no reservation.
     pub reservation_window: u64,
@@ -248,12 +256,16 @@ pub enum LzMessage {
     Cancel(CancelInstruction),
 }
 
-/// Parameters for an outbound LayerZero send. Simplified abstraction over the
-/// LayerZero V2 `MessagingParams`; the real endpoint adapter maps this 1:1.
+/// Parameters for an outbound LayerZero V2 send. The endpoint adapter maps
+/// these fields to the official `MessagingParams`; the fee remains an explicit
+/// repository-level argument because Soroban does not expose an EVM-style
+/// `msg.value` call surface.
 #[contracttype]
 #[derive(Clone)]
 pub struct MessagingParams {
     pub dst_eid: u32,
     pub receiver: BytesN<32>,
     pub message: Bytes,
+    pub options: Bytes,
+    pub pay_in_lz_token: bool,
 }
