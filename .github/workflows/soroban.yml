@@ -3,10 +3,10 @@ name: Soroban
 on:
   push:
     branches: [main]
-    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh"]
+    paths: ["contracts/soroban/**", "rust-toolchain.toml", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh", "scripts/check-toolchain.sh"]
   pull_request:
     branches: [main]
-    paths: ["contracts/soroban/**", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh"]
+    paths: ["contracts/soroban/**", "rust-toolchain.toml", ".github/workflows/soroban.yml", "scripts/check-spdx-headers.sh", "scripts/check-toolchain.sh"]
 
 concurrency:
   group: soroban-${{ github.ref }}
@@ -53,6 +53,11 @@ jobs:
             ~/.cargo/git
             contracts/soroban/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('contracts/soroban/**/Cargo.toml', 'rust-toolchain.toml') }}
+
+      # Fails a Cargo.lock update (e.g. from Dependabot) that pulls in a crate
+      # whose MSRV is newer than rust-toolchain.toml, with a clear step name.
+      - name: Cargo.lock builds on the pinned toolchain
+        run: cargo check --workspace --locked
 
       - name: Format check
         run: cargo fmt --all --check

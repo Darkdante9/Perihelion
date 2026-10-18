@@ -28,6 +28,17 @@ check_rust() {
     exit 1
   fi
   echo "✔ rust toolchain matches rust-toolchain.toml"
+
+  # The workspace MSRV drives the MSRV-aware resolver; if it drifts from the
+  # pin, lock updates can select crates the pinned compiler cannot build.
+  local msrv
+  msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' "$REPO_ROOT/contracts/soroban/Cargo.toml")"
+  echo "workspace rust-version (contracts/soroban/Cargo.toml): ${msrv:-<unset>}"
+  if [ -z "$msrv" ] || [[ "$pinned" != "$msrv" && "$pinned" != "$msrv".* ]]; then
+    echo "error: workspace rust-version '$msrv' does not match pinned toolchain $pinned" >&2
+    exit 1
+  fi
+  echo "✔ workspace rust-version matches rust-toolchain.toml"
 }
 
 check_foundry() {
