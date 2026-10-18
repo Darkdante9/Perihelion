@@ -128,6 +128,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev Local refund fallback: timed out waiting for cross-chain confirmation.
     ///      This value (0xFF) is EVM-only; it does not appear in Soroban messages.
     uint8 private constant CANCEL_REASON_LOCAL_TIMEOUT = 0xFF;
+    uint8 private constant IGNORE_UNKNOWN_LOCK = 0x01;
+    uint8 private constant IGNORE_ALREADY_FINALIZED = 0x02;
 
     bytes1 private constant PROTOCOL_VERSION = 0x01;
     bytes1 private constant MSG_FILL_INSTRUCTION = 0x01;
@@ -197,7 +199,8 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     /// @notice Mapping of allowed source assets. Only assets in this allowlist can be locked.
     mapping(address => bool) public assetAllowed;
-    /// @notice Mapping of per-asset maximum lock amounts. Zero means use global cap.
+    /// @notice Mapping of per-asset maximum lock amounts. Every allowlisted asset
+    ///         must have an explicit non-zero entry before it can be locked.
     mapping(address => uint256) public maxIntentAmountPerAsset;
 
     // --- Value caps (issue #145) -----------------------------------------------
@@ -207,12 +210,16 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     uint256 public maxIntentAmount;
     /// @notice Time window (in seconds) for rolling throughput cap. Zero means disabled.
     uint256 public rollingWindowDuration;
-    /// @notice Maximum total value that can be locked within rollingWindowDuration.
-    ///         Zero means unlimited. Timelock-governed.
+    /// @notice Deprecated protocol-wide value retained for ABI compatibility.
+    ///         Enforcement uses rollingWindowCapPerAsset instead.
     uint256 public rollingWindowCap;
+    /// @notice Maximum rolling-window amount for each allowlisted asset.
+    mapping(address => uint256) public rollingWindowCapPerAsset;
     /// @notice Whether the rolling-window cap has been triggered (exceeded).
     ///         When true, new locks are paused until the admin resets this flag.
     bool public rollingWindowTriggered;
+    /// @notice Asset whose rolling-window breach engaged the breaker.
+    address public rollingWindowTriggeredAsset;
     /// @notice Earliest timestamp at which rollingWindowTriggered may be reset.
     ///         Prevents spam-resetting the cap within the same window.
     uint256 public rollingWindowResetEarliestAt;
@@ -226,11 +233,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///         and cancelExpired. Allows skim() to compute the genuine on-chain surplus
     ///         and prevents the owner from draining active user deposits.
     mapping(address => uint256) public totalLocked;
-    /// @notice Rolling-window bucket tracking: window start timestamp => cumulative locked amount.
+    /// @notice Rolling-window bucket tracking per asset and window start.
     ///         Each lock bumps the current window bucket. Windows slide; old buckets are orphaned.
-    mapping(uint256 => uint256) private _rollingWindowBuckets;
+    mapping(address => mapping(uint256 => uint256)) private _rollingWindowBuckets;
     /// @notice Latest window start timestamp (memoized for efficiency).
-    uint256 private _latestWindowStart;
+    mapping(address => uint256) private _latestWindowStart;
 
     /// @notice Observational high-water mark for inbound nonces per source endpoint id.
     ///
@@ -316,6 +323,9 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     event RollingWindowCapSet(uint256 duration, uint256 cap);
     event RollingWindowCapTriggered(uint256 windowStart, uint256 accumulated);
     event RollingWindowCapReset();
+    event RollingWindowCapPerAssetSet(address indexed asset, uint256 duration, uint256 cap);
+    event FillConfirmedIgnored(bytes32 indexed intentHash, uint8 reason);
+    event CancelIgnored(bytes32 indexed intentHash, uint8 reason);
     event AssetAllowed(address indexed asset, bool allowed);
     event MaxIntentAmountPerAssetSet(address indexed asset, uint256 maxAmount);
 
@@ -363,6 +373,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     /// @dev skim() would draw into funds locked by active intents.
     error ExceedsSurplus();
     error AssetNotAllowed();
+    error AssetCapNotConfigured();
     error UnderDelivered();
     /// @dev A uint256 intent field cannot fit in the narrower wire/storage type
     ///      without wrapping (minDestAmount/sourceAmount vs uint128, deadline vs uint64).
@@ -525,6 +536,20 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         rollingWindowCap = _cap;
         emit RollingWindowCapSet(_windowDuration, _cap);
     }
+    /// @notice Set the rolling-window cap for one allowlisted asset.
+    ///         Window accounting is isolated by asset; amounts from another
+    ///         token can never consume this asset's bucket.
+    function setRollingWindowCapForAsset(address asset, uint256 _windowDuration, uint256 _cap)
+        external
+        onlyOwner
+    {
+        if (!assetAllowed[asset]) revert AssetNotAllowed();
+        if (_cap > 0 && _windowDuration == 0) revert InvalidDuration();
+        if (_windowDuration > block.timestamp) revert InvalidDuration();
+        rollingWindowDuration = _windowDuration;
+        rollingWindowCapPerAsset[asset] = _cap;
+        emit RollingWindowCapPerAssetSet(asset, _windowDuration, _cap);
+    }
 
     /// @notice Admin-only: reset the rolling-window cap trigger if it has been
     ///         exceeded. Can only be called after rollingWindowResetEarliestAt passes
@@ -535,11 +560,11 @@ contract PerihelionEscrow is ILayerZeroReceiver {
             revert RollingWindowNotYetResettable();
         }
         rollingWindowTriggered = false;
-        if (rollingWindowDuration > 0) {
+        if (rollingWindowDuration > 0 && rollingWindowTriggeredAsset != address(0)) {
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
-            delete _rollingWindowBuckets[windowStart];
+            delete _rollingWindowBuckets[rollingWindowTriggeredAsset][windowStart];
         }
-        _latestWindowStart = 0; // reset memoized window, forces recalc on next lock
+        rollingWindowTriggeredAsset = address(0);
         emit RollingWindowCapReset();
     }
 
@@ -660,7 +685,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         // Reject values that would silently wrap when narrowed to the storage/wire
         // type below (Lock.minDestAmount/deadline, and the FillInstruction fields),
         // rather than truncating a signed intent into a different meaning.
-        if (intent.minDestAmount > type(uint128).max) revert AmountTooLarge();
+        if (intent.minDestAmount > (uint256(type(uint128).max) >> 1)) revert AmountTooLarge();
         if (intent.sourceAmount > type(uint128).max) revert AmountTooLarge();
         if (intent.deadline > type(uint64).max) revert AmountTooLarge();
 
@@ -673,7 +698,13 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     ///      amount the escrow actually received.
     function _pullFunds(Intent calldata intent) private returns (uint256 received) {
         // Check value caps before pulling funds.
-        _checkValueCaps(intent.sourceAmount, intent.sourceAsset);
+        if (!_checkValueCaps(intent.sourceAmount, intent.sourceAsset)) {
+            if (msg.value > 0) {
+                (bool refunded,) = msg.sender.call{ value: msg.value }("");
+                if (!refunded) revert NativeTransferFailed();
+            }
+            return;
+        }
 
         // Measured-delta accounting: store exactly what the escrow received, so
         // fee-on-transfer / rebasing tokens can never release more than is held.
@@ -687,8 +718,7 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         if (received == 0) revert NothingReceived();
 
         // Commit the actual received amount to the rolling window accumulator.
-        _commitValueCaps(received);
-    }
+        _commitValueCaps(intent.sourceAsset, received);
 
     /// @dev Persist the lock, bump the aggregate liability and emit {Locked}.
     function _recordLock(bytes32 intentHash, Intent calldata intent, uint256 received) private {
@@ -745,53 +775,55 @@ contract PerihelionEscrow is ILayerZeroReceiver {
 
     // --- Value cap enforcement -----------------------------------------------
 
-    /// @dev Pre-flight check per-intent and rolling-window value caps against requested sourceAmount.
-    ///      Reverts if exceeded. Must be called before funds are transferred.
-    function _checkValueCaps(uint256 sourceAmount, address asset) private {
-        // Check 1: Per-intent maximum (per-asset takes precedence, then global)
-        uint256 maxAmount = maxIntentAmountPerAsset[asset] > 0
-            ? maxIntentAmountPerAsset[asset]
-            : maxIntentAmount;
-        if (maxAmount > 0 && sourceAmount > maxAmount) {
+    /// @dev Pre-flight check per-asset caps against requested sourceAmount.
+    ///      Returns false for a rolling-cap breach so the breaker latch and
+    ///      diagnostic event persist; no funds have been transferred yet.
+    function _checkValueCaps(uint256 sourceAmount, address asset) private returns (bool) {
+        // Every allowlisted asset requires an explicit per-asset maximum.
+        uint256 maxAmount = maxIntentAmountPerAsset[asset];
+        if (maxAmount == 0) revert AssetCapNotConfigured();
+        if (sourceAmount > maxAmount) {
             revert ExceedsMaxIntentAmount();
         }
 
         // Check 2: Rolling-window cap (disabled if duration is zero)
-        if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
-            // Reject if cap has already been triggered.
-            if (rollingWindowTriggered) {
-                revert RollingWindowCapAlreadyTriggered();
-            }
+        if (rollingWindowTriggered) {
+            revert RollingWindowCapAlreadyTriggered();
+        }
+        uint256 assetCap = rollingWindowCapPerAsset[asset];
+        if (rollingWindowDuration > 0 && assetCap > 0) {
 
             // Calculate current window start. Each window spans [windowStart, windowStart + duration).
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
 
             // If time has moved to a new window, existing bucket for this window is 0.
-            uint256 currentBucket = windowStart > _latestWindowStart
+            uint256 currentBucket = windowStart > _latestWindowStart[asset]
                 ? 0
-                : _rollingWindowBuckets[windowStart];
+                : _rollingWindowBuckets[asset][windowStart];
 
             uint256 projected = currentBucket + sourceAmount;
-            if (projected > rollingWindowCap) {
-                // Cap exceeded: trigger halt and record the window + amount for diagnostics.
+            if (projected > assetCap) {
+                // Do not revert: a revert would roll back the latch and event.
                 rollingWindowTriggered = true;
+                rollingWindowTriggeredAsset = asset;
                 rollingWindowResetEarliestAt = block.timestamp + rollingWindowDuration;
                 emit RollingWindowCapTriggered(windowStart, projected);
-                revert RollingWindowCapExceeded();
+                return false;
             }
         }
+        return true;
     }
 
     /// @dev Commit the measured delta (actual received tokens) to the rolling-window bucket.
     ///      Ensures fee-on-transfer tokens do not cause accumulator drift.
-    function _commitValueCaps(uint256 receivedAmount) private {
-        if (rollingWindowDuration > 0 && rollingWindowCap > 0) {
+    function _commitValueCaps(address asset, uint256 receivedAmount) private {
+        if (rollingWindowDuration > 0 && rollingWindowCapPerAsset[asset] > 0) {
             uint256 windowStart = (block.timestamp / rollingWindowDuration) * rollingWindowDuration;
-            if (windowStart > _latestWindowStart) {
-                _latestWindowStart = windowStart;
+            if (windowStart > _latestWindowStart[asset]) {
+                _latestWindowStart[asset] = windowStart;
                 // In a new window; prior buckets are orphaned and expire implicitly.
             }
-            _rollingWindowBuckets[windowStart] += receivedAmount;
+            _rollingWindowBuckets[asset][windowStart] += receivedAmount;
         }
     }
 
@@ -847,8 +879,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
         (bytes32 intentHash, address solverEvm, uint128 fillAmount, uint64 fillLedger) =
             _decodeFillConfirmed(message);
         Lock storage l = locks[intentHash];
-        if (l.user == address(0)) revert NotLocked();
-        if (l.released || l.refunded) revert AlreadyFinalized();
+        if (l.user == address(0)) {
+            emit FillConfirmedIgnored(intentHash, IGNORE_UNKNOWN_LOCK);
+            return;
+        }
+        if (l.released || l.refunded) {
+            emit FillConfirmedIgnored(intentHash, IGNORE_ALREADY_FINALIZED);
+            return;
+        }
         if (fillAmount < l.minDestAmount) revert UnderDelivered();
 
         l.released = true; // effect before interaction (race guard)
@@ -860,8 +898,14 @@ contract PerihelionEscrow is ILayerZeroReceiver {
     function _onCancelIntent(bytes calldata message) internal {
         (bytes32 intentHash, uint8 reason) = _decodeCancelIntent(message);
         Lock storage l = locks[intentHash];
-        if (l.user == address(0)) revert NotLocked();
-        if (l.released || l.refunded) revert AlreadyFinalized();
+        if (l.user == address(0)) {
+            emit CancelIgnored(intentHash, IGNORE_UNKNOWN_LOCK);
+            return;
+        }
+        if (l.released || l.refunded) {
+            emit CancelIgnored(intentHash, IGNORE_ALREADY_FINALIZED);
+            return;
+        }
 
         l.refunded = true;
         totalLocked[l.asset] -= l.amount;
