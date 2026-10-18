@@ -273,7 +273,7 @@ export class MempoolServer {
       res.status(400).json({ error: "Signature verification failed" });
       return;
     }
-    const hash = hashIntent(parsed);
+    const hash = hashIntent(parsed, this.domain);
     const record: MempoolIntentRecord = {
       hash,
       intent: parsed,
@@ -308,6 +308,17 @@ export class MempoolServer {
       status = statusParam as IntentStatus;
     }
 
+    const chainIdParam = req.query.chainId;
+    let chainId: number | undefined;
+    if (chainIdParam !== undefined) {
+      const parsed = typeof chainIdParam === "string" ? Number(chainIdParam) : NaN;
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        res.status(400).json({ error: "Invalid chainId filter" });
+        return;
+      }
+      chainId = parsed;
+    }
+
     const limitParam = req.query.limit;
     let limit = DEFAULT_LIST_LIMIT;
     if (limitParam !== undefined) {
@@ -320,30 +331,23 @@ export class MempoolServer {
     }
 
     const cursorParam = req.query.cursor;
-    let cursor: string | undefined;
+    let cursor: Hex | undefined;
     if (cursorParam !== undefined) {
-      if (typeof cursorParam !== "string" || cursorParam.length === 0) {
+      if (typeof cursorParam !== "string" || !HASH_RE.test(cursorParam.toLowerCase())) {
         res.status(400).json({ error: "Invalid cursor" });
         return;
       }
-      cursor = cursorParam;
-    }
-
-    const all = this.store.list(status);
-    let start = 0;
-    if (cursor !== undefined) {
-      const idx = all.findIndex((r) => r.hash === cursor);
-      if (idx === -1) {
+      cursor = cursorParam.toLowerCase() as Hex;
+      // An unknown cursor is a client error, not an empty page: the caller is
+      // paginating against a snapshot that no longer exists.
+      if (!this.store.get(cursor)) {
         res.status(400).json({ error: "Invalid cursor" });
         return;
       }
-      start = idx + 1;
     }
 
-    const page = all.slice(start, start + limit);
-    const hasMore = start + limit < all.length;
-    const nextCursor = hasMore && page.length > 0 ? page[page.length - 1].hash : undefined;
-    res.status(200).json({ records: page, nextCursor });
+    const result = this.store.list({ status, chainId, cursor, limit });
+    res.status(200).json(result);
   }
 
   private handleUpdateStatus(req: Request, res: Response): void {
