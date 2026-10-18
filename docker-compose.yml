@@ -77,11 +77,12 @@ services:
       NODE_ENV: development
       # EVM configuration
       PERIHELION_EVM_RPC_URL: http://anvil:8545
-      PERIHELION_SOURCE_EID: 30101
+      # Local placeholder endpoint ids; the settlement peer must use the same values.
+      PERIHELION_SOURCE_EID: 31337
       # Stellar configuration
       PERIHELION_STELLAR_RPC_URL: http://stellar:8000/rpc
       STELLAR_NETWORK: "Standalone Network ; February 2017"
-      PERIHELION_STELLAR_EID: 40161
+      PERIHELION_STELLAR_EID: 99161
       # Relayer configuration
       PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       PERIHELION_SETTLEMENT_CONTRACT: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"

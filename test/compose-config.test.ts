@@ -71,3 +71,14 @@ test("relayer and solver wait for a healthy mempool, not just a started containe
     assert.equal(service(name).depends_on?.mempool?.condition, "service_healthy", name);
   }
 });
+
+// Local placeholders. 30101 and 40161 are real LayerZero V2 endpoint ids
+// (Ethereum mainnet and Sepolia); the development stack must not use them.
+const LOCAL_EVM_EID = 31337;
+const LOCAL_STELLAR_EID = 99161;
+
+test("relayer uses local placeholder endpoint ids, not real LayerZero ones", () => {
+  const env = service("relayer").environment;
+  assert.equal(env?.PERIHELION_SOURCE_EID, LOCAL_EVM_EID);
+  assert.equal(env?.PERIHELION_STELLAR_EID, LOCAL_STELLAR_EID);
+});
