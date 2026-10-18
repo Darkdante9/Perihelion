@@ -3032,3 +3032,45 @@ fn endpoint_rotates_only_after_delayed_propose_and_confirm() {
     assert!(s.client.try_confirm_endpoint().is_ok());
     assert_eq!(s.client.endpoint(), new_ep);
 }
+
+// --- Issue #909: propose_endpoint must refuse to overwrite a pending proposal
+
+#[test]
+fn propose_endpoint_rejects_overwriting_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+    let original_proposed_at = s.env.ledger().timestamp();
+
+    s.client.propose_endpoint(&first);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY / 2;
+    });
+
+    assert!(
+        s.client.try_propose_endpoint(&second).is_err(),
+        "a second propose_endpoint while one is pending must be rejected"
+    );
+
+    // The pending proposal and its original timer must be untouched.
+    let (pending, proposed_at, _, _) = s
+        .client
+        .try_get_pending_endpoint()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending, first);
+    assert_eq!(proposed_at, original_proposed_at);
+}
+
+#[test]
+fn propose_endpoint_succeeds_after_cancel_of_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&first);
+    s.client.cancel_pending_endpoint();
+
+    assert!(s.client.try_propose_endpoint(&second).is_ok());
+}
