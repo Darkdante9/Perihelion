@@ -22,6 +22,9 @@ pub enum PerihelionError {
     // Endpoint and admin authorization failures are emitted by Soroban's
     // `require_auth` mechanism rather than this contract error enum. They are
     // intentionally not duplicated as unreachable ABI variants.
+    /// Intent reserved for a different preferred solver, or locked to a
+    /// different source-chain solver, during the reservation window.
+    ReservedForSolver = 132,
     /// Caller is not the pending admin nominee (accept_admin guard).
     NotPendingAdmin = 133,
     /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).

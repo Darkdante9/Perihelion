@@ -20,7 +20,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _, LedgerInfo},
+    testutils::{Address as _, Ledger as _},
     Address, BytesN, Env,
 };
 
@@ -31,7 +31,7 @@ use crate::test::{hash, register_intent, setup, Setup};
 /// Assumes a 5-second ledger close time for timestamp progression.
 fn advance_ledger(env: &Env, ledgers: u32) {
     env.ledger().with_mut(|li| {
-        li.sequence += ledgers;
+        li.sequence_number += ledgers;
         li.timestamp += (ledgers as u64) * 5;
     });
 }

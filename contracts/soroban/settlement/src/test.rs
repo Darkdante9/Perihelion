@@ -83,14 +83,14 @@ impl MockEndpoint {
 
 // --- Test harness -------------------------------------------------------------
 
-struct Setup {
-    env: Env,
-    client: PerihelionClient<'static>,
-    mock: MockEndpointClient<'static>,
-    asset: Address,
-    asset_admin: token::StellarAssetClient<'static>,
-    src_eid: u32,
-    peer: BytesN<32>,
+pub(crate) struct Setup {
+    pub(crate) env: Env,
+    pub(crate) client: PerihelionClient<'static>,
+    pub(crate) mock: MockEndpointClient<'static>,
+    pub(crate) asset: Address,
+    pub(crate) asset_admin: token::StellarAssetClient<'static>,
+    pub(crate) src_eid: u32,
+    pub(crate) peer: BytesN<32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,7 +181,7 @@ fn register_peer(env: &Env, client: &PerihelionClient, eid: u32, peer: &BytesN<3
     });
 }
 
-fn setup() -> Setup {
+pub(crate) fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| {
@@ -227,12 +227,12 @@ fn setup() -> Setup {
     }
 }
 
-fn hash(env: &Env, b: u8) -> BytesN<32> {
+pub(crate) fn hash(env: &Env, b: u8) -> BytesN<32> {
     BytesN::from_array(env, &[b; 32])
 }
 
 #[allow(clippy::too_many_arguments)]
-fn register_intent(
+pub(crate) fn register_intent(
     s: &Setup,
     h: &BytesN<32>,
     recipient: &Address,
