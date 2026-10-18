@@ -595,6 +595,27 @@ mod tests {
         );
     }
 
+    /// Issue #903: the 219-byte legacy layout (no trailing `reservation_window`)
+    /// shares protocol version 0x01 with the canonical 227-byte layout, so it must
+    /// be rejected rather than decoded with the window defaulted to 0. Checked
+    /// through `decode_message`, the codec `lz_receive_bytes` dispatches on.
+    #[test]
+    fn test_decode_message_rejects_219_byte_legacy_fill_instruction() {
+        const LEGACY: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_legacy_219.hex");
+
+        let env = Env::default();
+        let mut legacy_msg = Bytes::new(&env);
+        for b in decode_hex(LEGACY) {
+            legacy_msg.push_back(b);
+        }
+        assert_eq!(legacy_msg.len(), FILL_INSTRUCTION_LENGTH - 8);
+        assert_eq!(
+            decode_message(&env, &legacy_msg).err(),
+            Some(PerihelionError::MalformedPayload)
+        );
+    }
+
     /// A well-formed FillInstruction derived from the shared golden wire vector
     /// (`contracts/shared/wire-vectors/fill_instruction.hex`) decodes correctly.
     ///

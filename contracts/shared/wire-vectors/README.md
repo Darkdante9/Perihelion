@@ -158,5 +158,6 @@ FillInstruction, never decodes it, so rejection is a Soroban-side concern).
 | ---- | ------ | -------- | -------------- |
 | `fill_instruction_short.hex` | 226 | Last byte removed | `MalformedPayload` (length) |
 | `fill_instruction_long.hex` | 228 | Extra `0x00` appended | `MalformedPayload` (length) |
+| `fill_instruction_legacy_219.hex` | 219 | Trailing 8-byte `reservation_window` removed (the pre-#722 layout, same `version` `0x01`) | `MalformedPayload` (length) |
 | `fill_instruction_bad_version.hex` | 227 | `version` changed from `0x01` to `0x02` | `MalformedPayload` (version) |
 | `fill_instruction_bad_type.hex` | 227 | `type` changed from `0x01` to `0x04` | `UnknownMessageType` / `MalformedPayload` |
