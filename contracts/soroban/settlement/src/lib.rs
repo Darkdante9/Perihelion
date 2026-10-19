@@ -1926,8 +1926,16 @@ impl Perihelion {
         Ok(())
     }
 
-    /// Check per-intent and rolling-window value caps. Reverts if exceeded.
-    fn enforce_value_caps(env: &Env, amount: i128) -> Result<(), PerihelionError> {
+    /// Check per-intent and rolling-window value caps.
+    ///
+    /// Returns `Ok(true)` when the intent is within both caps and may be
+    /// registered. A rolling-window breach latches the breaker and returns
+    /// `Ok(false)`: the caller acknowledges the message without registering an
+    /// intent. It must not return `Err`, because Soroban rolls back every storage
+    /// write of an invocation that fails, which would discard the latch (#904).
+    /// While latched, every call fails with `RollingWindowCapTriggered` until
+    /// `reset_rolling_window_cap`.
+    fn enforce_value_caps(env: &Env, amount: i128) -> Result<bool, PerihelionError> {
         let storage = env.storage().instance();
 
         // Check 1: Per-intent maximum
@@ -1942,6 +1950,14 @@ impl Perihelion {
             if duration > 0 {
                 if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
                     if cap > 0 {
+                        // A tripped breaker stays tripped until an admin resets it.
+                        if storage
+                            .get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
+                            .unwrap_or(false)
+                        {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
                         // Calculate current window start. Each window spans [windowStart, windowStart + duration).
                         let now = env.ledger().timestamp();
                         let window_start = (now / duration) * duration;
@@ -1952,34 +1968,24 @@ impl Perihelion {
                             .unwrap_or(0);
                         if window_start > latest_window_start {
                             storage.set(&DataKey::LatestWindowStart, &window_start);
-                            // In a new window; prior bucket is abandoned. Restart accumulator.
-                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
-                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
-                            }
-                        }
-
-                        // Check if the current window's bucket already exceeds the cap.
-                        // If it does, a previous call breached the cap in this window and we latch
-                        // (issue #710: the accumulated value persists even if the breaching call
-                        // returned Err, so the bucket value itself acts as the latch).
-                        let current_accumulated = storage
-                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
-                            .unwrap_or(0);
-                        if current_accumulated > cap {
-                            return Err(PerihelionError::RollingWindowCapTriggered);
+                            // Leaving the memoized window: drop its bucket so that at most
+                            // one bucket exists, however many quiet windows pass (#905).
+                            storage.remove(&DataKey::RollingWindowBucket(latest_window_start));
                         }
 
                         // Accumulate this intent's amount into the current window.
+                        let current_accumulated = storage
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .unwrap_or(0);
                         let accumulated = current_accumulated
                             .checked_add(amount)
                             .ok_or(PerihelionError::ArithmeticError)?;
-
-                        // Update the bucket before checking the cap, so the accumulated value
-                        // persists even if the breaching call returns Err (issue #710).
                         storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
 
                         if accumulated > cap {
-                            // Cap exceeded: trigger halt and record the window for diagnostics.
+                            // Latch the breaker as a successful state transition. The message
+                            // is acknowledged with `Ok(false)` so these writes persist.
+                            storage.set(&DataKey::RollingWindowTriggered, &true);
                             storage.set(
                                 &DataKey::RollingWindowResetEarliestAt,
                                 &now.checked_add(duration)
@@ -1989,14 +1995,14 @@ impl Perihelion {
                                 (events::rolling_window_cap_triggered(env),),
                                 (window_start, accumulated),
                             );
-                            return Err(PerihelionError::RollingWindowCapExceeded);
+                            return Ok(false);
                         }
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn on_fill_instruction(
@@ -2059,8 +2065,11 @@ impl Perihelion {
             return Err(PerihelionError::UntrustedPeer);
         }
 
-        // Check value caps before registering the intent.
-        Self::enforce_value_caps(env, fi.min_dest_amount)?;
+        // Check value caps before registering the intent. A breach latches the
+        // breaker and acknowledges the message without registering it (#904).
+        if !Self::enforce_value_caps(env, fi.min_dest_amount)? {
+            return Ok(());
+        }
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),

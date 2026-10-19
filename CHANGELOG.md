@@ -19,9 +19,10 @@ versioned independently.
   exercises, and dispatches through the same endpoint/peer checks, pause gate,
   nonce guard and handlers as the typed `lz_receive`. The inbound decoders are now
   `pub` and compiled into the release contract instead of being
-  `#[allow(dead_code)]` test-only helpers, and `decode_fill_instruction` accepts
-  both the documented 219-byte layout and the 227-byte layout with a trailing
-  `reservation_window` (#722).
+  `#[allow(dead_code)]` test-only helpers. `decode_fill_instruction` accepts only
+  the canonical 227-byte layout with a trailing `reservation_window`; the
+  219-byte layout shares protocol version `0x01` and is rejected as
+  `MalformedPayload` (#722, #903).
 
 ### Changed
 
