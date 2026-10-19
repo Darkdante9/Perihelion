@@ -211,7 +211,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SolverConfig {
 
   // --- Optional: mempool URL (defaults to localhost dev server) ---
   const rawMempoolUrl = env.PERIHELION_MEMPOOL_URL ?? "http://localhost:3000";
-  let mempoolUrl = rawMempoolUrl;
+  const mempoolUrl = rawMempoolUrl;
   try {
     const parsed = new URL(rawMempoolUrl);
     if (

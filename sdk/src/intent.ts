@@ -554,6 +554,6 @@ export function toMessage(intent: Intent) {
     minDestAmount: BigInt(intent.minDestAmount),
     deadline: BigInt(intent.deadline),
     nonce: BigInt(intent.nonce),
-    preferredSolver: intent.preferredSolver as Address,
+    preferredSolver: intent.preferredSolver,
   };
 }

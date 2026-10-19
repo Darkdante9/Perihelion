@@ -153,9 +153,10 @@ test-all-strict: assert-all-toolchains ## Run all test suites; FAILS if any tool
 
 lint: lint-ts lint-soroban lint-evm ## Lint all stacks
 
-lint-ts: ## Lint TypeScript packages
+lint-ts: ## Lint TypeScript (ESLint) and type-check every workspace (tsc)
 	@echo "▶ lint-ts"
-	npm run lint --if-present
+	npm run lint
+	npm run typecheck
 
 lint-soroban: ## Clippy lint for Soroban contract
 	@echo "▶ lint-soroban"

@@ -224,7 +224,7 @@ export function isSolverEligible(
   // `InvalidAddressError` on invalid input. Treat it as ineligible so the
   // caller produces a terminal skip instead of an escaping exception.
   if (!isAddress(preferredSolver)) return false;
-  const preferred = preferredSolver as Address;
+  const preferred = preferredSolver;
   return (
     isAddressEqual(preferred, zeroAddress) ||
     isAddressEqual(preferred, solverAddress)

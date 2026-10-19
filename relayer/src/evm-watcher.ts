@@ -113,7 +113,7 @@ function canonicalFillInstruction(
   // Canonical locking solver is a left-padded bytes32 EVM address.
   Buffer.from(solver.slice(2), "hex").copy(out, 199);
   // reservation_window is currently zero until included in the signed EVM intent.
-  return `0x${out.toString("hex")}` as Hex;
+  return `0x${out.toString("hex")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +276,7 @@ export class EVMSourceWatcher implements SourceWatcher {
         return {
           number: blockNum,
           hash: block.hash,
-          parentHash: block.parentHash as string,
+          parentHash: block.parentHash,
         };
       });
       const headers = await this._batchConcurrent(headerTasks, this.transactionFetchConcurrency);
@@ -356,12 +356,12 @@ export class EVMSourceWatcher implements SourceWatcher {
     try {
       const [, , dst, assetStr, minDest, deadlineValue] = decodeAbiParameters(
         LOCKED_DATA_PARAMS,
-        log.data as Hex,
+        log.data,
       );
-      destination = dst as string;
-      destAsset = assetStr as string;
-      minDestAmount = minDest as bigint;
-      deadline = deadlineValue as bigint;
+      destination = dst;
+      destAsset = assetStr;
+      minDestAmount = minDest;
+      deadline = deadlineValue;
     } catch {
       return null;
     }
@@ -375,15 +375,15 @@ export class EVMSourceWatcher implements SourceWatcher {
     const message: BridgeMessage = {
       srcEid: this.config.sourceEid,
       dstEid: this.config.stellarEid,
-      intentHash: intentHash as Hex,
+      intentHash: intentHash,
       messageType: "FillInstruction",
-      solver: solver as Hex,
+      solver: solver,
       recipient: destination,
       destAsset: destAsset,
       amount: minDestAmount.toString(),
       nonce,
       rawPayload: canonicalFillInstruction(
-        intentHash as Hex, solver as Hex, this.config.stellarEid,
+        intentHash, solver, this.config.stellarEid,
         destination, destAsset, minDestAmount, deadline,
       ),
     };
