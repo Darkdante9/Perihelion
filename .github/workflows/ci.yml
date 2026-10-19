@@ -24,8 +24,9 @@ name: CI
 #              | package.json, package-lock.json, .nvmrc,       | scoped per job via
 #              | tsconfig.base.json,                            | dorny/paths-filter
 #              | .github/workflows/coverage.yml                 |
-# diff-fuzz.yml| (all paths; schedule + dispatch)               | Differential fuzz
-#              |                                                | + cross-validation
+# diff-fuzz.yml| contracts/soroban/**, contracts/evm/**,       | Differential fuzz
+#              | contracts/shared/wire-vectors/**; schedule    | + cross-validation
+#              | + dispatch run unfiltered                      |
 # pr-lint.yml  | (all PRs)                                      | Conventional-
 #              |                                                | commit title check
 # ─────────────────────────────────────────────────────────

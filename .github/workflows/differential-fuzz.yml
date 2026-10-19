@@ -3,10 +3,22 @@ name: Differential Fuzz
 on:
   push:
     branches: [main]
+    paths:
+      - 'contracts/soroban/**'
+      - 'contracts/evm/**'
+      - 'contracts/shared/wire-vectors/**'
+      - 'scripts/run-differential-fuzz.sh'
+      - '.github/workflows/differential-fuzz.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'contracts/soroban/**'
+      - 'contracts/evm/**'
+      - 'contracts/shared/wire-vectors/**'
+      - 'scripts/run-differential-fuzz.sh'
+      - '.github/workflows/differential-fuzz.yml'
   schedule:
-    # Nightly extended run at 2 AM UTC
+    # Nightly extended run at 2 AM UTC (unfiltered; ignores the paths above)
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
