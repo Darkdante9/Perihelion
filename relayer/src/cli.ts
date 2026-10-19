@@ -57,13 +57,9 @@ async function main(): Promise<void> {
     timeoutSeconds: config.txTimeoutSeconds,
   });
 
-  const checkpoint = new FileCheckpointStore(
-    process.env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json",
-  );
+  const checkpoint = new FileCheckpointStore(config.checkpointFile);
 
-  const deadLetter = new HybridDeadLetterStore(
-    process.env.PERIHELION_DEAD_LETTER_FILE || "./.perihelion-relayer-dead-letter.json",
-  );
+  const deadLetter = new HybridDeadLetterStore(config.deadLetterFile);
   await deadLetter.load();
 
   const relayer = new Relayer(
@@ -77,8 +73,12 @@ async function main(): Promise<void> {
   );
 
   // Health / readiness / metrics HTTP server.
-  const healthPort = Number(process.env.PERIHELION_HEALTH_PORT ?? 8080);
-  const healthServer = new HealthServer(relayer, healthPort, log);
+  const healthServer = new HealthServer(relayer, config.healthPort, log, {
+    host: config.healthHost,
+    metricsToken: config.metricsToken,
+    stalenessThresholdMs: config.readinessStaleMs,
+    maxLagBlocks: config.maxLagBlocks,
+  });
   await healthServer.start();
 
   let shuttingDown = false;
