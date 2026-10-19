@@ -10,6 +10,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - 'contracts/**/*.md'
       - '.spectral.yaml'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
@@ -22,6 +23,7 @@ on:
     paths:
       - 'docs/**'
       - '*.md'
+      - 'contracts/**/*.md'
       - '.spectral.yaml'
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
@@ -155,15 +157,15 @@ jobs:
       - name: Check relative links
         run: |
           set -e
-          FILES=$(find . -name '*.md' \
+          FAILED=0
+          while IFS= read -r -d '' f; do
+            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
+          done < <(find . -name '*.md' \
             -not -path './node_modules/*' \
             -not -path './.git/*' \
             -not -path '*/target/*' \
-            -not -path '*/contracts/*')
-          FAILED=0
-          for f in $FILES; do
-            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
-          done
+            -not -path './contracts/evm/lib/*' \
+            -print0)
           exit $FAILED
 
   markdown-links-external:
@@ -184,13 +186,13 @@ jobs:
       - name: Check all links including external
         run: |
           set -e
-          FILES=$(find . -name '*.md' \
+          FAILED=0
+          while IFS= read -r -d '' f; do
+            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
+          done < <(find . -name '*.md' \
             -not -path './node_modules/*' \
             -not -path './.git/*' \
             -not -path '*/target/*' \
-            -not -path '*/contracts/*')
-          FAILED=0
-          for f in $FILES; do
-            markdown-link-check "$f" --config .mlc-config.json || FAILED=1
-          done
+            -not -path './contracts/evm/lib/*' \
+            -print0)
           exit $FAILED
