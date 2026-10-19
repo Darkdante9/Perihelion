@@ -55,6 +55,10 @@ COPY --from=build /app/${PACKAGE}/package.json ./${PACKAGE}/
 COPY --from=build /app/${PACKAGE}/dist ./${PACKAGE}/dist
 COPY docker/healthcheck.cjs /usr/local/lib/perihelion/healthcheck.cjs
 
+# Writable state directory for the relayer checkpoint and dead-letter files.
+# /app is root-owned, so state must live here; compose mounts a volume over it.
+RUN mkdir -p /var/lib/perihelion && chown node:node /var/lib/perihelion
+
 # Run as the non-root `node` user (uid 1000) the base image already ships.
 # Creating another account named `node` collides with it and fails the build.
 USER node
