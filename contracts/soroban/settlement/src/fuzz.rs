@@ -23,8 +23,9 @@ use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::messages::{decode_message, encode_cancel_intent, encode_fill_confirmed};
 use crate::types::{
-    CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, MSG_CANCEL_INTENT,
-    MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
+    CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID,
+    FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
+    MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
 use proptest::prelude::*;
@@ -211,7 +212,7 @@ fn fill_instruction_matches_golden_vector() {
         // encode_fill_instruction writes [0u8; 32] for preferred_solver regardless
         // of this field — "open" (no reservation) is the canonical wire value.
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let encoded = crate::messages::encode_fill_instruction(&env, &fi);
