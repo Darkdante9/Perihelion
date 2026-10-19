@@ -24,7 +24,7 @@
     "clean": "npm run clean --workspaces --if-present",
     "fmt": "npm run fmt --workspaces --if-present",
     "fmt:check": "npm run fmt:check --workspaces --if-present",
-    "prepare": "lefthook install"
+    "prepare": "[ -e .git ] && lefthook install || true"
   },
   "engines": {
     "node": ">=20"
