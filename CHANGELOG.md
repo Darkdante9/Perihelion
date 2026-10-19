@@ -41,6 +41,20 @@ versioned independently.
 
 ### Fixed
 
+- The local Stellar quickstart service in `docker-compose.yml` uses the standalone
+  network passphrase that `--local` creates, points the relayer and solver at the
+  `/rpc` Soroban endpoint, and probes `getHealth` with `curl` instead of `node`,
+  which the quickstart image does not ship (#894).
+- The mempool service in `docker-compose.yml` uses the image's `/healthz` healthcheck
+  instead of an override that reported a 404 from `/health` as healthy. The relayer
+  and solver wait for `service_healthy` (#895).
+- The local stack in `docker-compose.yml` uses placeholder LayerZero endpoint ids
+  (31337 for the EVM side, 99161 for Stellar) instead of the Ethereum mainnet and
+  Sepolia ids 30101 and 40161 (#896).
+- The local stack in `docker-compose.yml` no longer defaults the escrow address to
+  Anvil's first account, which is an EOA, or the settlement contract id to a contract
+  that is never deployed. Both are required, so `docker compose up` fails fast when
+  they are unset (#897).
 - The differential-fuzz workflow runs again (#816, #823, #824, #825). It now
   installs Foundry `stable` (the pinned nightly had been pruned and returned
   HTTP 404), reads the Soroban SDK major version correctly (the greedy `sed`
