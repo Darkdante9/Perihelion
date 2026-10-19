@@ -20,12 +20,17 @@ COPY test/package.json test/
 # ─── Build stage: full dependency tree, compile every workspace ─────────────
 FROM base AS build
 
+ARG PACKAGE=relayer
+
 RUN npm ci
 
-# .dockerignore keeps node_modules, .git, dist/ and target/ out of the
-# context, so this copy cannot clobber the tree npm ci just installed.
-COPY . .
-RUN npm run build
+# Copy only what the target image needs. Other workspaces are not compiled,
+# so a broken package cannot block this image and unrelated edits do not
+# invalidate the cache. The sdk is a shared dependency of every service.
+COPY tsconfig.base.json ./
+COPY sdk ./sdk
+COPY ${PACKAGE} ./${PACKAGE}
+RUN npm run build -w @perihelion/sdk -w @perihelion/${PACKAGE}
 
 # ─── Production dependencies only (no typescript, tsx, c8, @types/*) ────────
 FROM base AS prod-deps
