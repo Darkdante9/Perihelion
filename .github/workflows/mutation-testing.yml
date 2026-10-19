@@ -124,10 +124,10 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -275,6 +275,10 @@ jobs:
     needs: [mutants-soroban, mutants-ts, mutants-evm]
     if: always()
     runs-on: ubuntu-latest
+    # Write access is granted to this job only, for the tracking-issue step.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Final summary
         run: |
@@ -288,6 +292,47 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download artefacts for the full report (surviving mutants, triage list)." >> $GITHUB_STEP_SUMMARY
           echo "See docs/mutation-testing.md for how to action surviving mutants." >> $GITHUB_STEP_SUMMARY
+
+      # A persistent nightly failure must not go unnoticed (the job is red
+      # on every run until fixed). Open one tracking issue keyed on a stable
+      # title and comment on it for each further failing run, the same
+      # pattern differential-fuzz.yml uses. Skipped stacks do not count.
+      - name: Report to tracking issue
+        if: github.event_name == 'schedule' && contains(join(needs.*.result, ' '), 'failure')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SOROBAN_RESULT: ${{ needs.mutants-soroban.result }}
+          TS_RESULT: ${{ needs.mutants-ts.result }}
+          EVM_RESULT: ${{ needs.mutants-evm.result }}
+        run: |
+          title="[MUTATION] Nightly mutation testing is failing"
+          {
+            echo "### Run details"
+            echo ""
+            echo "- Run: $RUN_URL"
+            echo "- Soroban: \`$SOROBAN_RESULT\`"
+            echo "- TypeScript: \`$TS_RESULT\`"
+            echo "- EVM: \`$EVM_RESULT\`"
+          } > run-details.md
+
+          existing=$(gh issue list --repo "$REPO" --state open --limit 100 \
+                       --search "\"$title\" in:title" --json number,title \
+                     | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n1)
+
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file run-details.md
+          else
+            {
+              echo "The nightly mutation testing workflow finished with a failing stack."
+              echo "Mutation scores were not enforced for the failing stack(s); see the run below."
+              echo ""
+              cat run-details.md
+            } > issue-body.md
+            gh issue create --repo "$REPO" --title "$title" --label "bug,mutation-testing" \
+              --body-file issue-body.md
+          fi
 
       # Surface a red run at the top level too. "skipped" is fine (the
       # stack was not selected on a manual dispatch); anything else is not.
