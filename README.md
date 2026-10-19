@@ -220,7 +220,7 @@ workspace for the Soroban contracts, and a Foundry project for the EVM contracts
 | -------------------------------------------------------------------- | -------------------- | ---------------- |
 | [Node.js](https://nodejs.org)                                        | SDK, solver, relayer | ≥ 20             |
 | [Rust](https://rustup.rs) + `wasm32-unknown-unknown` target          | Soroban contracts    | stable           |
-| [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli) | Soroban build/deploy | latest           |
+| [Stellar CLI](https://developers.stellar.org/docs/tools/cli) | Soroban build/deploy | latest           |
 | [Foundry](https://book.getfoundry.sh)                                | EVM contracts        | latest           |
 
 > The TypeScript packages build and test with only Node.js installed; the Rust
@@ -408,7 +408,7 @@ disclosure process in [`SECURITY.md`](./SECURITY.md).
 ## Community & Support
 
 - 🐛 **Bugs & features:** [open an issue](https://github.com/Perihelion-Protocol/Perihelion/issues)
-- 💬 **Questions & design discussion:** [GitHub Discussions](https://github.com/Perihelion-Protocol/Perihelion/discussions)
+- 💬 **Questions & design discussion:** [open an issue](https://github.com/Perihelion-Protocol/Perihelion/issues/new/choose)
 - 📣 **Updates:** watch the repository for releases
 
 ## License

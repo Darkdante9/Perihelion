@@ -204,4 +204,4 @@ the merge history preserved one.
   above before merge, not just after.
 
 [Unreleased]: https://github.com/Perihelion-Protocol/Perihelion/compare/main...HEAD
-[0.1.0]: https://github.com/Perihelion-Protocol/Perihelion/releases/tag/v0.1.0
+[0.1.0]: https://github.com/Perihelion-Protocol/Perihelion/commits/main

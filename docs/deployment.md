@@ -38,7 +38,7 @@ unpause, or change configuration.
 
 ## 2. Prerequisites
 
-- [Foundry](https://book.getfoundry.sh) and the [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli).
+- [Foundry](https://book.getfoundry.sh) and the [Stellar CLI](https://developers.stellar.org/docs/tools/cli).
 - The LayerZero V2 endpoint address and endpoint id (EID) for each chain.
 - A funded deployer key per chain (used only for deployment; it ends up holding
   no privileged role).
