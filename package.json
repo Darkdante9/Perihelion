@@ -23,8 +23,8 @@
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
-    "fmt": "npm run fmt --workspaces --if-present",
-    "fmt:check": "npm run fmt:check --workspaces --if-present",
+    "fmt": "prettier --write \"{sdk,relayer,solver,mempool,test}/{src,test}/**/*.ts\" eslint.config.mjs",
+    "fmt:check": "prettier --check \"{sdk,relayer,solver,mempool,test}/{src,test}/**/*.ts\" eslint.config.mjs",
     "prepare": "lefthook install"
   },
   "engines": {

@@ -180,11 +180,9 @@ lint-evm: ## Slither static analysis for EVM contract (requires slither)
 
 fmt: fmt-ts fmt-soroban fmt-evm ## Auto-format all stacks
 
-fmt-ts: ## Format TypeScript (prettier, if configured)
+fmt-ts: ## Format TypeScript sources with Prettier
 	@echo "▶ fmt-ts"
-	@if npm run fmt --if-present 2>/dev/null; then true; else \
-		echo "⏭ skipping fmt-ts — no fmt script configured (Prettier not yet introduced)"; \
-	fi
+	npm run fmt
 
 fmt-soroban: ## Format Rust code (rustfmt)
 	@echo "▶ fmt-soroban"
