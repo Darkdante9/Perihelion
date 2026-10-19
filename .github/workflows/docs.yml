@@ -77,6 +77,23 @@ jobs:
           errors = []
           template_dir = Path(".github/ISSUE_TEMPLATE")
 
+          def check_chooser_config(path, doc):
+              # config.yml configures GitHub's template chooser; it is not an
+              # issue form, so it has no name/description/body to validate.
+              if "blank_issues_enabled" in doc and not isinstance(doc["blank_issues_enabled"], bool):
+                  errors.append(f"{path}: 'blank_issues_enabled' must be a boolean")
+              links = doc.get("contact_links", [])
+              if not isinstance(links, list):
+                  errors.append(f"{path}: 'contact_links' must be a list")
+                  return
+              for i, link in enumerate(links):
+                  if not isinstance(link, dict):
+                      errors.append(f"{path}: contact_links[{i}] must be a mapping")
+                      continue
+                  for key in ("name", "url", "about"):
+                      if key not in link:
+                          errors.append(f"{path}: contact_links[{i}] missing required field '{key}'")
+
           for path in sorted(template_dir.glob("*.yml")):
               try:
                   with open(path) as f:
@@ -87,6 +104,10 @@ jobs:
 
               if not isinstance(doc, dict):
                   errors.append(f"{path}: expected a YAML mapping at the top level")
+                  continue
+
+              if path.name == "config.yml":
+                  check_chooser_config(path, doc)
                   continue
 
               for required in ("name", "description"):
