@@ -193,15 +193,13 @@ pub(crate) fn setup() -> Setup {
     let endpoint = env.register(MockEndpoint, ());
     let mock = MockEndpointClient::new(&env, &endpoint);
 
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
-
     // Create a mock native token for testing keeper rewards
     let issuer = Address::generate(&env);
     let native_sac = env.register_stellar_asset_contract_v2(issuer);
     let native_token = native_sac.address();
 
-    client.initialize(&admin, &endpoint, &native_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
@@ -275,7 +273,7 @@ fn register_intent_with_window(
         min_dest_amount: min,
         deadline,
         preferred_solver: preferred,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window,
     };
     let origin = Origin {
@@ -565,7 +563,7 @@ fn rejects_message_from_untrusted_peer() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let bad_sender = BytesN::from_array(&s.env, &[0xAB; 32]);
@@ -822,7 +820,7 @@ fn try_deliver_nonce(
         min_dest_amount: 1,
         deadline,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -856,9 +854,11 @@ fn nonce_pruned_event_count(env: &Env) -> usize {
         .all()
         .iter()
         .filter(|(_, topics, _)| {
-            topics
-                .iter()
-                .any(|t| Symbol::try_from_val(env, &t).map(|s| s == expected).unwrap_or(false))
+            topics.iter().any(|t| {
+                Symbol::try_from_val(env, &t)
+                    .map(|s| s == expected)
+                    .unwrap_or(false)
+            })
         })
         .count()
 }
@@ -1043,7 +1043,7 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -1061,33 +1061,44 @@ fn fill_instruction_body_src_eid_overridden_by_transport_eid() {
         "src_eid must be overridden to transport origin.src_eid, not the body-declared attacker_eid");
 }
 
-#[test]
-#[should_panic(expected = "Error(Contract, #100)")] // AlreadyInitialized
-fn rejects_double_initialize() {
-    let s = setup();
-    let admin = Address::generate(&s.env);
-    let endpoint = Address::generate(&s.env);
-    let native_token = Address::generate(&s.env);
-    s.client.initialize(&admin, &endpoint, &native_token);
-}
-
-// --- Issue #18: initialize validation ----------------------------------------
+// --- Issue #910: configuration is set by the constructor, not a separate call ---
 
 #[test]
-#[should_panic(expected = "Error(Contract, #134)")] // AdminEndpointCollision
-fn rejects_initialize_with_admin_eq_endpoint() {
+fn constructor_sets_endpoint_and_native_token_at_deploy() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| {
         li.timestamp = 1_000;
         li.max_entry_ttl = 3_110_400;
     });
-    let id = env.register(Perihelion, ());
+    let admin = Address::generate(&env);
+    let endpoint = env.register(MockEndpoint, ());
+    let native_token = Address::generate(&env);
+
+    // Deploying with arguments is the only way to create the contract, so there
+    // is no window in which a third party can name its admin or endpoint first.
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
     let client = PerihelionClient::new(&env, &id);
+
+    assert_eq!(client.endpoint(), endpoint);
+    assert_eq!(client.native_token(), Some(native_token));
+}
+
+// --- Issue #18: constructor validation ----------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #134)")] // AdminEndpointCollision
+fn rejects_constructor_with_admin_eq_endpoint() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+        li.max_entry_ttl = 3_110_400;
+    });
     let addr = Address::generate(&env);
     let native_token = Address::generate(&env);
-    // admin == endpoint must be rejected
-    client.initialize(&addr, &addr, &native_token);
+    // admin == endpoint must abort deployment
+    env.register(Perihelion, (&addr, &addr, &native_token));
 }
 
 #[test]
@@ -1099,11 +1110,9 @@ fn initialize_emits_event() {
         li.max_entry_ttl = 3_110_400;
     });
     let endpoint_addr = env.register(MockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
     let native_token = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr, &native_token);
+    env.register(Perihelion, (&admin, &endpoint_addr, &native_token));
     // Verify the initialized event was published (env records all events).
     let events = env.events().all();
     let expected = Symbol::new(&env, "initialized");
@@ -1189,7 +1198,8 @@ fn set_endpoint_emits_event() {
 fn peer_governance_propose_emits_event() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let events = s.env.events().all();
     assert!(!events.is_empty(), "expected peer_change_proposed event");
 }
@@ -1198,7 +1208,8 @@ fn peer_governance_propose_emits_event() {
 fn peer_governance_confirm_requires_delay() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Should fail if called before the delay
     assert!(s.client.try_confirm_peer(&s.src_eid).is_err());
@@ -1214,7 +1225,8 @@ fn peer_governance_confirm_requires_delay() {
 fn peer_governance_cancel_clears_pending() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Cancel the pending peer change
     assert!(s.client.try_cancel_pending_peer(&s.src_eid).is_ok());
@@ -1237,7 +1249,8 @@ fn peer_governance_get_pending_peer() {
     assert!(pending.unwrap().unwrap().is_none());
 
     // After propose, should return the pending peer
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     let pending = s.client.try_get_pending_peer(&s.src_eid);
     assert!(pending.is_ok());
     let (peer, _proposed_at, _ready_at, _expires_at) = pending.unwrap().unwrap().unwrap();
@@ -1507,11 +1520,9 @@ fn initialized_event_shape() {
         li.max_entry_ttl = 3_110_400;
     });
     let endpoint_addr = env.register(MockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
     let admin = Address::generate(&env);
     let native_token = Address::generate(&env);
-    client.initialize(&admin, &endpoint_addr, &native_token);
+    env.register(Perihelion, (&admin, &endpoint_addr, &native_token));
 
     let events = env.events().all();
     // Event: ("initialized",) -> (admin, endpoint)
@@ -1540,7 +1551,8 @@ fn peer_set_event_shape() {
     let new_peer: BytesN<32> = BytesN::from_array(&s.env, &[0xFF; 32]);
 
     // Propose the new peer
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
 
     // Advance time past the minimum delay
     s.env.ledger().with_mut(|li| {
@@ -1677,7 +1689,7 @@ fn registration_rejected_when_no_peer_for_src_eid() {
         min_dest_amount: 1,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     // Deliver via the registered peer for s.src_eid (transport origin is fine),
@@ -2509,14 +2521,12 @@ fn cancel_succeeds_without_native_token_configured() {
     let endpoint = env.register(MockEndpoint, ());
     let _mock = MockEndpointClient::new(&env, &endpoint);
 
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
-
-    // Initialize with a native token that we'll use initially
+    // Configure with a native token that we'll use initially
     let issuer = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(issuer);
     let initial_token = sac.address();
-    client.initialize(&admin, &endpoint, &initial_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &initial_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
@@ -2543,7 +2553,7 @@ fn cancel_succeeds_without_native_token_configured() {
         min_dest_amount: 100_000,
         deadline: 5_000,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -2665,31 +2675,122 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
 
         assert_parity(&h, 0, PerihelionError::InvalidAmount, "zero amount");
     }
-
 }
 
 // --- Rolling-window accessors (issue #680) -----------------------------------
 
+/// Deliver a FillInstruction as raw LayerZero bytes through `lz_receive_bytes`,
+/// the inbound path the endpoint uses in production. Used by the rolling-window
+/// breaker tests, which must exercise the real `Ok`/`Err` outcome of a breach.
+fn try_deliver_fill_bytes(
+    s: &Setup,
+    h: &BytesN<32>,
+    recipient: &Address,
+    min: i128,
+    nonce: u64,
+) -> Result<(), PerihelionError> {
+    let fi = FillInstruction {
+        intent_hash: h.clone(),
+        src_eid: s.src_eid,
+        recipient: recipient.clone(),
+        dest_asset: s.asset.clone(),
+        min_dest_amount: min,
+        deadline: 20_000,
+        preferred_solver: None,
+        locked_solver: Some(BytesN::from_array(&s.env, &[0x22; 32])),
+        reservation_window: 0,
+    };
+    let message = crate::messages::encode_fill_instruction(&s.env, &fi);
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    match s.client.try_lz_receive_bytes(&origin, &guid, &message) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => panic!("lz_receive_bytes return value failed to convert: {e:?}"),
+        Err(e) => Err(e.expect("lz_receive_bytes aborted with a non-contract error")),
+    }
+}
+
 #[test]
 fn get_rolling_window_reset_at_reports_latched_reset_time() {
     let s = setup();
+    // One-hour window with a 1_000 cap.
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
 
-    // Nothing latched before the cap triggers.
+    // Nothing latched while the window is under the cap.
+    assert_eq!(s.client.get_rolling_window_reset_at(), None);
+    try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 600, 1)
+        .expect("600 is within the 1_000 cap");
     assert_eq!(s.client.get_rolling_window_reset_at(), None);
 
-    // Seed the latched state the breaker writes when the cap trips. Driving it
-    // through lz_receive is not possible today: the breaker returns `Err`
-    // after writing, so the latch is rolled back with the rest of the call
-    // (tracked separately in #710).
-    let reset_at: u64 = 1_000 + 3_600;
-    s.env.as_contract(&s.client.address, || {
-        let storage = s.env.storage().instance();
-        storage.set(&DataKey::RollingWindowTriggered, &true);
-        storage.set(&DataKey::RollingWindowResetEarliestAt, &reset_at);
-    });
-
+    // The breaching message is acknowledged (Ok) but registers no intent,
+    // and the latch and its reset time persist (#904).
+    try_deliver_fill_bytes(&s, &hash(&s.env, 2), &recipient, 600, 2)
+        .expect("a breach must be acknowledged, not rolled back");
     assert!(s.client.is_rolling_window_cap_triggered());
-    assert_eq!(s.client.get_rolling_window_reset_at(), Some(reset_at));
+    assert!(s.client.get_intent(&hash(&s.env, 2)).is_none());
+    assert_eq!(
+        s.client.get_rolling_window_reset_at(),
+        Some(s.env.ledger().timestamp() + 3_600)
+    );
+}
+
+#[test]
+fn rolling_window_keeps_one_bucket_across_quiet_windows() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000_000);
+    let recipient = Address::generate(&s.env);
+
+    // Traffic in window 0, then in window 2 after a quiet window 1, then in
+    // window 5 after two more quiet windows. Each advance must drop the bucket
+    // of the window it leaves (#905).
+    for (nonce, ts) in [(1u64, 1_000u64), (2, 7_300), (3, 18_100)] {
+        s.env.ledger().with_mut(|li| li.timestamp = ts);
+        try_deliver_fill_bytes(&s, &hash(&s.env, nonce as u8), &recipient, 10, nonce)
+            .expect("within cap");
+    }
+
+    let windows = [0u64, 3_600, 7_200, 10_800, 14_400, 18_000];
+    for w in windows {
+        let present = s.env.as_contract(&s.client.address, || {
+            s.env
+                .storage()
+                .instance()
+                .has(&DataKey::RollingWindowBucket(w))
+        });
+        assert_eq!(present, w == 18_000, "bucket for window {w}");
+    }
+}
+
+#[test]
+fn rolling_window_latch_rejects_until_admin_reset() {
+    let s = setup();
+    s.client.set_rolling_window_cap(&3_600, &1_000);
+    let recipient = Address::generate(&s.env);
+    let reset_at = s.env.ledger().timestamp() + 3_600;
+
+    try_deliver_fill_bytes(&s, &hash(&s.env, 1), &recipient, 1_200, 1)
+        .expect("breach is acknowledged");
+    assert!(s.client.is_rolling_window_cap_triggered());
+
+    // A below-cap message is still rejected while latched: the breaker holds
+    // even though this amount would fit in a fresh window.
+    let err = try_deliver_fill_bytes(&s, &hash(&s.env, 2), &recipient, 1, 2)
+        .expect_err("latched breaker must reject new intents");
+    assert_eq!(err, PerihelionError::RollingWindowCapTriggered);
+    assert!(s.client.get_intent(&hash(&s.env, 2)).is_none());
+
+    // Once the reset time passes and the admin resets, the same message registers.
+    s.env.ledger().with_mut(|li| li.timestamp = reset_at);
+    s.client.reset_rolling_window_cap();
+    assert!(!s.client.is_rolling_window_cap_triggered());
+    try_deliver_fill_bytes(&s, &hash(&s.env, 3), &recipient, 1, 3)
+        .expect("after reset a below-cap message registers");
+    assert!(s.client.get_intent(&hash(&s.env, 3)).is_some());
 }
 
 #[test]
@@ -2969,10 +3070,7 @@ fn dispatch_confirmation_skips_reward_when_native_token_unset() {
     // a deployment where the admin forgot to call set_native_token.
     s.client.set_dispatch_keeper_reward(&50_000i128);
     s.env.as_contract(&s.client.address, || {
-        s.env
-            .storage()
-            .instance()
-            .remove(&DataKey::NativeToken);
+        s.env.storage().instance().remove(&DataKey::NativeToken);
     });
 
     let h = hash(&s.env, 0xE3);
@@ -3020,7 +3118,8 @@ fn list_undispatched_intents_filters_correctly() {
     // h3: Fully confirmed via fill_intent — should NOT appear.
     let h3 = hash(&s.env, 0xF3);
     register_intent(&s, &h3, &recipient, 100_000, 9_000, 3, None);
-    s.client.fill_intent(&solver, &solver_evm, &h3, &100_000, &0);
+    s.client
+        .fill_intent(&solver, &solver_evm, &h3, &100_000, &0);
 
     // h4: Filled via deliver_intent, then dispatched — should NOT appear.
     let h4 = hash(&s.env, 0xF4);
@@ -3084,7 +3183,164 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
 
     // The keeper can still dispatch to recover the solver's capital.
     s.env.ledger().with_mut(|li| li.timestamp = 1_000); // reset to before-deadline for dispatch
-    // (dispatch_confirmation has no deadline restriction — it's the recovery path)
+                                                        // (dispatch_confirmation has no deadline restriction — it's the recovery path)
     s.client.dispatch_confirmation(&keeper, &h, &0);
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+}
+
+// --- Issue #906: value caps must not sum across destination assets ---------
+
+#[test]
+fn rolling_window_cap_does_not_sum_across_destination_assets() {
+    let s = setup();
+    // One window cap of 1_000 units, shared by every intent that reaches
+    // `enforce_value_caps`. Each asset should get its own budget, so 800 of
+    // asset A and 800 of asset B must both be accepted in the same window.
+    s.client.set_rolling_window_cap(&3_600u64, &1_000i128);
+
+    register_intent(
+        &s,
+        &hash(&s.env, 0x91),
+        &Address::generate(&s.env),
+        800,
+        5_000,
+        1,
+        None,
+    );
+
+    let other_issuer = Address::generate(&s.env);
+    let other_asset = s
+        .env
+        .register_stellar_asset_contract_v2(other_issuer)
+        .address();
+    let fi = FillInstruction {
+        intent_hash: hash(&s.env, 0x92),
+        src_eid: s.src_eid,
+        recipient: Address::generate(&s.env),
+        dest_asset: other_asset,
+        min_dest_amount: 800,
+        deadline: 5_000,
+        preferred_solver: None,
+        locked_solver: None,
+        reservation_window: 0,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    assert!(
+        s.client
+            .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi))
+            .is_ok(),
+        "a breach-free amount on a second asset must not be rejected by the first asset's window"
+    );
+    assert!(!s.client.is_rolling_window_cap_triggered());
+}
+
+// --- Issue #907: expired peer proposals must be cleared, not rolled back ---
+
+#[test]
+fn expired_peer_proposal_is_cleared_and_allows_new_proposal() {
+    let s = setup();
+    let stale_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    let corrected_peer = BytesN::from_array(&s.env, &[0xFE; 32]);
+    s.client
+        .propose_peer(&s.src_eid, &stale_peer, &MIN_PEER_CHANGE_DELAY);
+
+    // Move past delay + grace so the proposal is expired.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
+    });
+    // The confirm attempt must not leave the stale proposal behind. An `Err`
+    // return would roll back the cleanup, so the pending entry has to be gone
+    // on its own merits.
+    let _ = s.client.try_confirm_peer(&s.src_eid);
+
+    assert!(matches!(
+        s.client.try_get_pending_peer(&s.src_eid),
+        Ok(Ok(None))
+    ));
+    assert!(
+        s.client
+            .try_propose_peer(&s.src_eid, &corrected_peer, &MIN_PEER_CHANGE_DELAY)
+            .is_ok(),
+        "a corrected peer must be proposable immediately after an expired proposal"
+    );
+}
+
+// --- Issue #908: the endpoint must only rotate through the delayed path -----
+
+#[test]
+fn set_endpoint_cannot_rotate_endpoint_instantly() {
+    let s = setup();
+    let original = s.client.endpoint();
+    let new_ep = Address::generate(&s.env);
+
+    assert!(
+        s.client.try_set_endpoint(&new_ep).is_err(),
+        "set_endpoint must not rotate the trusted endpoint in one transaction"
+    );
+    assert_eq!(s.client.endpoint(), original);
+}
+
+#[test]
+fn endpoint_rotates_only_after_delayed_propose_and_confirm() {
+    let s = setup();
+    let new_ep = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&new_ep);
+    assert!(
+        s.client.try_confirm_endpoint().is_err(),
+        "confirm_endpoint must wait for MIN_PEER_CHANGE_DELAY"
+    );
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.try_confirm_endpoint().is_ok());
+    assert_eq!(s.client.endpoint(), new_ep);
+}
+
+// --- Issue #909: propose_endpoint must refuse to overwrite a pending proposal
+
+#[test]
+fn propose_endpoint_rejects_overwriting_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+    let original_proposed_at = s.env.ledger().timestamp();
+
+    s.client.propose_endpoint(&first);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY / 2;
+    });
+
+    assert!(
+        s.client.try_propose_endpoint(&second).is_err(),
+        "a second propose_endpoint while one is pending must be rejected"
+    );
+
+    // The pending proposal and its original timer must be untouched.
+    let (pending, proposed_at, _, _) = s
+        .client
+        .try_get_pending_endpoint()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending, first);
+    assert_eq!(proposed_at, original_proposed_at);
+}
+
+#[test]
+fn propose_endpoint_succeeds_after_cancel_of_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&first);
+    s.client.cancel_pending_endpoint();
+
+    assert!(s.client.try_propose_endpoint(&second).is_ok());
 }

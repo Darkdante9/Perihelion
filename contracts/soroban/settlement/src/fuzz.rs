@@ -15,6 +15,8 @@
 
 #![cfg(test)]
 
+use crate::types::{CANCEL_INTENT_LENGTH, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH};
+
 extern crate std;
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
@@ -210,7 +212,7 @@ fn fill_instruction_matches_golden_vector() {
         // encode_fill_instruction writes [0u8; 32] for preferred_solver regardless
         // of this field — "open" (no reservation) is the canonical wire value.
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let encoded = crate::messages::encode_fill_instruction(&env, &fi);

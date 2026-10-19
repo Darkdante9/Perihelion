@@ -19,6 +19,9 @@ pub enum PerihelionError {
     ContractPaused = 102,
 
     // --- Authorization ---
+    /// Intent is reserved for a different preferred solver or EVM lock holder
+    /// until its reservation window expires (solver-lock exclusivity).
+    ReservedForSolver = 132,
     // Endpoint and admin authorization failures are emitted by Soroban's
     // `require_auth` mechanism rather than this contract error enum. They are
     // intentionally not duplicated as unreachable ABI variants.
@@ -73,6 +76,9 @@ pub enum PerihelionError {
     InvalidDelay = 152,
     /// A peer change is already pending for this eid, must cancel first (issue #715).
     PendingPeerChangeExists = 153,
+    /// Intent is reserved for its preferred solver or source-escrow identity until
+    /// the reservation window expires.
+    ReservedForSolver = 154,
 
     // --- Messaging ---
     /// Payload failed structural validation.

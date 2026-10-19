@@ -30,10 +30,11 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
 
+use crate::strkey;
 use crate::types::{
-    CancelInstruction, FillInstruction, CANCEL_REASON_ADMIN, CANCEL_REASON_EXPIRED,
-    CANCEL_REASON_INVALID, CANCEL_INTENT_LENGTH, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH, MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED,
-    MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
+    CancelInstruction, FillInstruction, CANCEL_INTENT_LENGTH, CANCEL_REASON_ADMIN,
+    CANCEL_REASON_EXPIRED, CANCEL_REASON_INVALID, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH,
+    MSG_CANCEL_INTENT, MSG_FILL_CONFIRMED, MSG_FILL_INSTRUCTION, PROTOCOL_VERSION,
 };
 
 /// Build an `Address` from a raw 32-byte contract-id payload.
@@ -331,6 +332,10 @@ fn decode_fill_instruction(
 /// the last non-zero byte, takes the prefix as the strkey string, and converts
 /// it using `Address::from_string_bytes` which handles both account keys (G...)
 /// and contract keys (C...) without reinterpreting raw bytes as a contract id.
+///
+/// `Address::from_string_bytes` traps the host on invalid input rather than
+/// returning an error, so the strkey is fully validated first (length, prefix,
+/// alphabet, version byte and CRC16). Any failure is `MalformedPayload` (issue #902).
 fn decode_strkey_address(env: &Env, padded: &[u8]) -> Result<Address, crate::PerihelionError> {
     use crate::PerihelionError;
     // Find length by trimming trailing zero bytes.
@@ -339,11 +344,12 @@ fn decode_strkey_address(env: &Env, padded: &[u8]) -> Result<Address, crate::Per
         .rposition(|&b| b != 0)
         .map(|p| p + 1)
         .unwrap_or(0);
-    if len == 0 {
+    let strkey_bytes = &padded[..len];
+    if !strkey::is_valid_strkey(strkey_bytes) {
         return Err(PerihelionError::MalformedPayload);
     }
     let mut b = Bytes::new(env);
-    for &byte in &padded[..len] {
+    for &byte in strkey_bytes {
         b.push_back(byte);
     }
     // from_string_bytes accepts both G... (account) and C... (contract) strkeys.
@@ -442,6 +448,7 @@ mod tests {
 
     use super::*;
     use crate::fuzz::decode_hex;
+    use crate::PerihelionError;
 
     // A known valid G... account strkey (all-zeros account).
     const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -452,10 +459,8 @@ mod tests {
     #[test]
     fn test_decode_strkey_address_g_key() {
         let env = Env::default();
-        let mut buf = [0u8; 32];
-        let strkey = ZERO_ACCOUNT.as_bytes();
-        let copy_len = strkey.len().min(32);
-        buf[..copy_len].copy_from_slice(&strkey[..copy_len]);
+        let mut buf = [0u8; 56];
+        buf.copy_from_slice(ZERO_ACCOUNT.as_bytes());
 
         let addr = decode_strkey_address(&env, &buf).expect("should decode G... strkey");
         // Round-trip: the decoded Address should re-encode to the same strkey.
@@ -470,11 +475,8 @@ mod tests {
     #[test]
     fn test_decode_strkey_address_c_key() {
         let env = Env::default();
-        let strkey = ZERO_CONTRACT.as_bytes();
-        // The C... strkey is 56 bytes, fits in a 56-byte padded field; use 32 for this test.
-        let copy_len = strkey.len().min(32);
-        let mut buf = [0u8; 32];
-        buf[..copy_len].copy_from_slice(&strkey[..copy_len]);
+        let mut buf = [0u8; 56];
+        buf.copy_from_slice(ZERO_CONTRACT.as_bytes());
 
         // Should not panic — from_string_bytes handles C... keys.
         let addr = decode_strkey_address(&env, &buf).expect("should decode C... strkey");
@@ -485,9 +487,53 @@ mod tests {
     #[test]
     fn test_decode_strkey_address_empty_returns_error() {
         let env = Env::default();
-        let buf = [0u8; 32];
+        let buf = [0u8; 56];
         let result = decode_strkey_address(&env, &buf);
-        assert!(result.is_err());
+        assert_eq!(result.err(), Some(PerihelionError::MalformedPayload));
+    }
+
+    /// Negative vectors for issue #902: each malformed strkey must come back as
+    /// `MalformedPayload` from the decoder, never as a host trap.
+    #[test]
+    fn test_decode_strkey_address_malformed_vectors_return_error() {
+        let env = Env::default();
+        let valid = ZERO_ACCOUNT.as_bytes();
+
+        // Bad checksum: last character changed, prefix and alphabet still valid.
+        let mut bad_checksum = [0u8; 56];
+        bad_checksum.copy_from_slice(valid);
+        bad_checksum[55] = b'A';
+        assert_eq!(
+            decode_strkey_address(&env, &bad_checksum).err(),
+            Some(PerihelionError::MalformedPayload)
+        );
+
+        // Wrong version byte: the prefix is swapped to G over a contract payload,
+        // so the version byte and the checksum no longer agree.
+        let mut wrong_version = [0u8; 56];
+        wrong_version.copy_from_slice(ZERO_CONTRACT.as_bytes());
+        wrong_version[0] = b'G';
+        assert_eq!(
+            decode_strkey_address(&env, &wrong_version).err(),
+            Some(PerihelionError::MalformedPayload)
+        );
+
+        // Interior NUL: a zero byte inside the strkey, followed by more characters.
+        let mut interior_nul = [0u8; 56];
+        interior_nul.copy_from_slice(valid);
+        interior_nul[20] = 0;
+        assert_eq!(
+            decode_strkey_address(&env, &interior_nul).err(),
+            Some(PerihelionError::MalformedPayload)
+        );
+
+        // Short strkey: 55 characters, one short of the canonical length.
+        let mut short = [0u8; 56];
+        short[..55].copy_from_slice(&valid[..55]);
+        assert_eq!(
+            decode_strkey_address(&env, &short).err(),
+            Some(PerihelionError::MalformedPayload)
+        );
     }
 
     /// decode_fill_instruction requires exactly FILL_INSTRUCTION_LENGTH bytes.
@@ -546,6 +592,27 @@ mod tests {
         assert!(
             decode_fill_instruction(&env, &long_msg).is_err(),
             "decoder must reject a payload one byte long"
+        );
+    }
+
+    /// Issue #903: the 219-byte legacy layout (no trailing `reservation_window`)
+    /// shares protocol version 0x01 with the canonical 227-byte layout, so it must
+    /// be rejected rather than decoded with the window defaulted to 0. Checked
+    /// through `decode_message`, the codec `lz_receive_bytes` dispatches on.
+    #[test]
+    fn test_decode_message_rejects_219_byte_legacy_fill_instruction() {
+        const LEGACY: &str =
+            include_str!("../../../shared/wire-vectors/neg/fill_instruction_legacy_219.hex");
+
+        let env = Env::default();
+        let mut legacy_msg = Bytes::new(&env);
+        for b in decode_hex(LEGACY) {
+            legacy_msg.push_back(b);
+        }
+        assert_eq!(legacy_msg.len(), FILL_INSTRUCTION_LENGTH - 8);
+        assert_eq!(
+            decode_message(&env, &legacy_msg).err(),
+            Some(PerihelionError::MalformedPayload)
         );
     }
 

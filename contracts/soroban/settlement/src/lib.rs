@@ -38,7 +38,7 @@ pub use endpoint::{EndpointClient, LzEndpoint};
 pub use error::PerihelionError;
 pub use types::*;
 
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env};
 
 use messages::{encode_cancel_intent, encode_fill_confirmed};
 
@@ -167,6 +167,13 @@ pub const MIN_MAX_TTL: u32 = MAX_TTL_DEFAULT;
 /// instead of being stored as an apparently valid but inert configuration.
 pub const MAX_TTL_CEILING: u32 = 6_312_000;
 
+/// Instance-entry TTL policy (issue #912). The instance holds the admin, endpoint,
+/// peers, pause flags, caps and nonce floors, so when its remaining TTL drops below
+/// `INSTANCE_TTL_THRESHOLD` ledgers it is extended to `INSTANCE_TTL_EXTEND`
+/// (~70 days at ~5 s/ledger). Every state-changing entrypoint bumps it.
+pub const INSTANCE_TTL_THRESHOLD: u32 = 17_280;
+pub const INSTANCE_TTL_EXTEND: u32 = 1_209_600;
+
 /// Cap on how many fully-consumed `InboundNonceWord` entries
 /// `prune_nonce_words` may delete in one call (issue #718). 256 words × 64
 /// nonces = up to 16,384 nonces reclaimed per invocation, bounding the scan
@@ -225,7 +232,11 @@ pub struct Perihelion;
 
 #[contractimpl]
 impl Perihelion {
-    /// Initialize with an admin, the trusted LayerZero endpoint, and the native token address.
+    /// Configure the contract with an admin, the trusted LayerZero endpoint, and the
+    /// native token address. Runs as the Soroban constructor, so the configuration is
+    /// written in the same transaction that creates the contract instance (issue #910).
+    /// There is no separate initialiser to front-run: the first observable state of
+    /// the contract already names its admin and endpoint.
     ///
     /// # Validation (issue #18)
     /// - `admin` and `endpoint` must be distinct addresses. Conflating them
@@ -247,19 +258,13 @@ impl Perihelion {
     ///
     /// Emits an `initialized` event so deployment tooling can confirm the
     /// configured values without polling storage.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        endpoint: Address,
-        native_token: Address,
-    ) -> Result<(), PerihelionError> {
+    pub fn __constructor(env: Env, admin: Address, endpoint: Address, native_token: Address) {
         let storage = env.storage().instance();
-        if storage.has(&DataKey::Admin) {
-            return Err(PerihelionError::AlreadyInitialized);
-        }
         // Issue #18: reject identical admin and endpoint — role separation invariant.
+        // A constructor cannot return an error to the deployer, so a failed check
+        // aborts the deployment transaction, which is the only atomic outcome here.
         if admin == endpoint {
-            return Err(PerihelionError::AdminEndpointCollision);
+            panic_with_error!(&env, PerihelionError::AdminEndpointCollision);
         }
         storage.set(&DataKey::Admin, &admin);
         storage.set(&DataKey::Endpoint, &endpoint);
@@ -271,13 +276,12 @@ impl Perihelion {
         // Initialize dispatch keeper reward to 0. Admin must call set_dispatch_keeper_reward
         // to enable keeper incentives for dispatch_confirmation.
         storage.set(&DataKey::DispatchKeeperReward, &0i128);
-        storage.extend_ttl(17_280, 1_209_600);
+        Self::bump_instance(&env);
 
         // Issue #16/#18: emit an event so deployment tooling and off-chain
         // monitors can confirm the configured roles without polling storage.
         env.events()
             .publish((events::initialized(&env),), (admin, endpoint));
-        Ok(())
     }
 
     // --- Admin configuration ---------------------------------------------------
@@ -289,6 +293,7 @@ impl Perihelion {
     /// high-sensitivity: a malicious rotation would redirect all inbound
     /// LayerZero message delivery.
     pub fn set_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         env.storage()
@@ -312,6 +317,7 @@ impl Perihelion {
     ///
     /// Emits `endpoint_change_proposed(old, new, ready_at)`.
     pub fn propose_endpoint(env: Env, new_endpoint: Address) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         let old: Option<Address> = env.storage().instance().get(&DataKey::Endpoint);
         let now = env.ledger().timestamp();
@@ -344,6 +350,7 @@ impl Perihelion {
     /// - `EndpointChangeNotReady` if the minimum delay has not yet elapsed
     /// - `EndpointChangeExpired` if the grace period has elapsed since the proposal
     pub fn confirm_endpoint(env: Env) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
         let proposed_endpoint: Address = env
@@ -395,6 +402,7 @@ impl Perihelion {
     ///
     /// Emits `endpoint_change_cancelled()`.
     pub fn cancel_pending_endpoint(env: Env) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
         env.storage().instance().remove(&DataKey::PendingEndpoint);
@@ -448,7 +456,13 @@ impl Perihelion {
     /// outbound dispatch (`dispatch` looks up `Peer(dst_eid)` where
     /// `dst_eid == rec.src_eid`). This is the intended design: the trusted
     /// counterparty for a given endpoint id is symmetric.
-    pub fn propose_peer(env: Env, eid: u32, new_peer: BytesN<32>, delay: u64) -> Result<(), PerihelionError> {
+    pub fn propose_peer(
+        env: Env,
+        eid: u32,
+        new_peer: BytesN<32>,
+        delay: u64,
+    ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if delay < MIN_PEER_CHANGE_DELAY || delay > MAX_PEER_CHANGE_DELAY {
             return Err(PerihelionError::InvalidDelay);
@@ -491,6 +505,7 @@ impl Perihelion {
     /// - `PeerChangeNotReady` if the specified delay has not yet elapsed
     /// - `PeerChangeExpired` if the grace period has elapsed since the proposal
     pub fn confirm_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
         let proposed_peer: BytesN<32> = env
@@ -552,6 +567,7 @@ impl Perihelion {
     ///
     /// Emits `peer_change_cancelled(eid)` (issue #165).
     pub fn cancel_pending_peer(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
         env.storage().instance().remove(&DataKey::PendingPeer(eid));
@@ -581,7 +597,10 @@ impl Perihelion {
     ) -> Result<Option<(BytesN<32>, u64, u64, u64)>, PerihelionError> {
         let peer: Option<BytesN<32>> = env.storage().instance().get(&DataKey::PendingPeer(eid));
         let time: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerTime(eid));
-        let delay: Option<u64> = env.storage().instance().get(&DataKey::PendingPeerDelay(eid));
+        let delay: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingPeerDelay(eid));
 
         Ok(match (peer, time, delay) {
             (Some(p), Some(t), Some(d)) => {
@@ -609,6 +628,7 @@ impl Perihelion {
     ///
     /// Emits `admin_transfer_started(old, new)` (issue #16).
     pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         let current = Self::require_admin(&env)?;
         current.require_auth();
         env.storage()
@@ -637,7 +657,7 @@ impl Perihelion {
         let old = Self::require_admin(&env)?;
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
-        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        Self::bump_instance(&env);
         env.events()
             .publish((events::admin_transfer_completed(&env),), (old, pending));
         Ok(())
@@ -648,6 +668,7 @@ impl Perihelion {
     ///
     /// Emits `paused_set(value)` (issue #16).
     pub fn set_paused(env: Env, paused: bool) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         env.storage().instance().set(&DataKey::Paused, &paused);
         env.events().publish((events::paused_set(&env),), (paused,));
@@ -664,6 +685,7 @@ impl Perihelion {
     ///
     /// Emits `paused_eid_set(eid, paused)` event.
     pub fn set_paused_eid(env: Env, eid: u32, paused: bool) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         env.storage()
             .instance()
@@ -688,6 +710,7 @@ impl Perihelion {
     ///
     /// Emits `keeper_reward_set(new_reward)` event.
     pub fn set_keeper_reward(env: Env, reward: i128) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if reward < 0 {
             return Err(PerihelionError::InvalidAmount);
@@ -717,6 +740,7 @@ impl Perihelion {
     ///
     /// Emits `dispatch_keeper_reward_set(new_reward)` event.
     pub fn set_dispatch_keeper_reward(env: Env, reward: i128) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if reward < 0 {
             return Err(PerihelionError::InvalidAmount);
@@ -736,6 +760,7 @@ impl Perihelion {
     ///
     /// Emits `max_intent_amount_set(max_amount)` event.
     pub fn set_max_intent_amount(env: Env, max_amount: i128) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if max_amount < 0 {
             return Err(PerihelionError::InvalidAmount);
@@ -763,6 +788,7 @@ impl Perihelion {
         duration: u64,
         cap: i128,
     ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if cap < 0 {
             return Err(PerihelionError::InvalidAmount);
@@ -784,6 +810,7 @@ impl Perihelion {
     ///
     /// Emits `rolling_window_cap_reset()` event.
     pub fn reset_rolling_window_cap(env: Env) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
 
         let now = env.ledger().timestamp();
@@ -824,6 +851,7 @@ impl Perihelion {
     /// payouts. The address differs per network (Testnet, Futurenet, Pubnet).
     /// Issue #173.
     pub fn set_native_token(env: Env, native_token: Address) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         env.storage()
             .instance()
@@ -853,6 +881,7 @@ impl Perihelion {
     /// Emits `max_ttl_set(old, new)` so off-chain monitors can alert on a change
     /// to this replay-safety-relevant clamp without polling storage (issue #719).
     pub fn set_max_ttl(env: Env, max_ttl: u32) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_admin(&env)?.require_auth();
         if max_ttl < MIN_MAX_TTL || max_ttl > MAX_TTL_CEILING {
             return Err(PerihelionError::InvalidAmount);
@@ -899,12 +928,11 @@ impl Perihelion {
     /// Emits `nonce_words_pruned(eid, old_floor, new_floor)` (issue #718).
     /// No-op (and no event) when nothing below the floor can be reclaimed.
     pub fn prune_nonce_words(env: Env, eid: u32) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::require_not_paused(&env)?;
 
         let instance = env.storage().instance();
-        let floor: u64 = instance
-            .get(&DataKey::InboundNonceFloor(eid))
-            .unwrap_or(0);
+        let floor: u64 = instance.get(&DataKey::InboundNonceFloor(eid)).unwrap_or(0);
         let old_floor = floor;
 
         // Word containing the current floor. Words strictly below it were
@@ -983,6 +1011,7 @@ impl Perihelion {
         _guid: BytesN<32>,
         message: LzMessage,
     ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::authorize_inbound(&env, &origin)?;
         Self::apply_inbound(&env, &origin, message)
     }
@@ -1009,6 +1038,7 @@ impl Perihelion {
         _guid: BytesN<32>,
         message: Bytes,
     ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         Self::authorize_inbound(&env, &origin)?;
 
         let (msg_type, fill_instruction, cancel_instruction) =
@@ -1134,10 +1164,10 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
         env.storage().persistent().extend_ttl(
             &DataKey::Settled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
-        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        Self::bump_instance(&env);
 
         env.events().publish(
             (events::FILLED, intent_hash),
@@ -1160,6 +1190,7 @@ impl Perihelion {
         intent_hash: BytesN<32>,
         lz_fee: i128,
     ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         caller.require_auth();
 
         // Guard against double-dispatch
@@ -1187,11 +1218,7 @@ impl Perihelion {
         // Refuse a Stellar dispatch after that earliest possible refund boundary;
         // otherwise the user could be refunded on EVM and then receive a late
         // FillConfirmed message for the same intent.
-        if env
-            .ledger()
-            .timestamp()
-            > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW)
-        {
+        if env.ledger().timestamp() > rec.deadline.saturating_add(MIN_DISPATCH_WINDOW) {
             return Err(PerihelionError::IntentExpired);
         }
 
@@ -1213,8 +1240,8 @@ impl Perihelion {
         // (issue #284 / #29 retention-asymmetry invariant).
         env.storage().persistent().extend_ttl(
             &DataKey::ConfirmationSent(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
 
         rec.status = IntentStatus::ConfirmationSent;
@@ -1337,15 +1364,15 @@ impl Perihelion {
         env.storage().persistent().extend_ttl(&key, bump / 2, bump);
         env.storage().persistent().extend_ttl(
             &DataKey::Settled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
         env.storage().persistent().extend_ttl(
             &DataKey::ConfirmationSent(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
-        env.storage().instance().extend_ttl(17_280, 1_209_600);
+        Self::bump_instance(&env);
 
         env.events().publish(
             (events::FILLED, intent_hash.clone()),
@@ -1354,10 +1381,8 @@ impl Perihelion {
 
         // Emit confirmation_sent event — issue #709: this event is needed for off-chain
         // reconciliation to know the repayment message has been dispatched.
-        env.events().publish(
-            (events::confirmation_sent(&env), intent_hash),
-            (solver,),
-        );
+        env.events()
+            .publish((events::confirmation_sent(&env), intent_hash), (solver,));
         Ok(())
     }
 
@@ -1385,6 +1410,7 @@ impl Perihelion {
         intent_hash: BytesN<32>,
         lz_fee: i128,
     ) -> Result<(), PerihelionError> {
+        Self::bump_instance(&env);
         caller.require_auth();
 
         // Cancelled marker: already cancelled — terminal, return IntentFinalized.
@@ -1433,8 +1459,8 @@ impl Perihelion {
             .set(&DataKey::Cancelled(intent_hash.clone()), &true);
         env.storage().persistent().extend_ttl(
             &DataKey::Cancelled(intent_hash.clone()),
-            MAX_TTL / 2,
-            MAX_TTL,
+            Self::max_ttl(&env) / 2,
+            Self::max_ttl(&env),
         );
 
         Self::send_cancel(&env, &caller, &rec, types::CANCEL_REASON_EXPIRED, lz_fee)?;
@@ -1599,8 +1625,7 @@ impl Perihelion {
         let mut out = soroban_sdk::Vec::new(&env);
         for h in intent_hashes.iter() {
             // Filled = Settled marker present AND ConfirmationSent marker absent.
-            if p.has(&DataKey::Settled(h.clone()))
-                && !p.has(&DataKey::ConfirmationSent(h.clone()))
+            if p.has(&DataKey::Settled(h.clone())) && !p.has(&DataKey::ConfirmationSent(h.clone()))
             {
                 out.push_back(h);
             }
@@ -1645,10 +1670,7 @@ impl Perihelion {
 
     /// Quote the LayerZero native fee required to dispatch a FillConfirmed message
     /// to `dst_eid` (the source-chain EVM escrow).
-    pub fn quote_fill_confirmed_fee(
-        env: Env,
-        dst_eid: u32,
-    ) -> Result<i128, PerihelionError> {
+    pub fn quote_fill_confirmed_fee(env: Env, dst_eid: u32) -> Result<i128, PerihelionError> {
         let dummy_message =
             soroban_sdk::Bytes::from_slice(&env, &[0u8; FILL_CONFIRMED_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)
@@ -1656,10 +1678,7 @@ impl Perihelion {
 
     /// Quote the LayerZero native fee required to dispatch a CancelIntent message
     /// to `dst_eid` (the source-chain EVM escrow).
-    pub fn quote_cancel_fee(
-        env: Env,
-        dst_eid: u32,
-    ) -> Result<i128, PerihelionError> {
+    pub fn quote_cancel_fee(env: Env, dst_eid: u32) -> Result<i128, PerihelionError> {
         let dummy_message =
             soroban_sdk::Bytes::from_slice(&env, &[0u8; CANCEL_INTENT_LENGTH as usize]);
         Self::quote_lz_fee(env, dst_eid, dummy_message)
@@ -1917,12 +1936,20 @@ impl Perihelion {
         // REPLAY-SAFETY: archival of this entry re-opens the 64 nonces it
         // covers. Always extend TTL to MAX_TTL so the word outlives any
         // realistic in-flight delivery window.
-        ps.extend_ttl(&word_key, MAX_TTL / 2, MAX_TTL);
+        ps.extend_ttl(&word_key, Self::max_ttl(env) / 2, Self::max_ttl(env));
         Ok(())
     }
 
-    /// Check per-intent and rolling-window value caps. Reverts if exceeded.
-    fn enforce_value_caps(env: &Env, amount: i128) -> Result<(), PerihelionError> {
+    /// Check per-intent and rolling-window value caps.
+    ///
+    /// Returns `Ok(true)` when the intent is within both caps and may be
+    /// registered. A rolling-window breach latches the breaker and returns
+    /// `Ok(false)`: the caller acknowledges the message without registering an
+    /// intent. It must not return `Err`, because Soroban rolls back every storage
+    /// write of an invocation that fails, which would discard the latch (#904).
+    /// While latched, every call fails with `RollingWindowCapTriggered` until
+    /// `reset_rolling_window_cap`.
+    fn enforce_value_caps(env: &Env, amount: i128) -> Result<bool, PerihelionError> {
         let storage = env.storage().instance();
 
         // Check 1: Per-intent maximum
@@ -1937,6 +1964,14 @@ impl Perihelion {
             if duration > 0 {
                 if let Some(cap) = storage.get::<DataKey, i128>(&DataKey::RollingWindowCap) {
                     if cap > 0 {
+                        // A tripped breaker stays tripped until an admin resets it.
+                        if storage
+                            .get::<DataKey, bool>(&DataKey::RollingWindowTriggered)
+                            .unwrap_or(false)
+                        {
+                            return Err(PerihelionError::RollingWindowCapTriggered);
+                        }
+
                         // Calculate current window start. Each window spans [windowStart, windowStart + duration).
                         let now = env.ledger().timestamp();
                         let window_start = (now / duration) * duration;
@@ -1947,34 +1982,24 @@ impl Perihelion {
                             .unwrap_or(0);
                         if window_start > latest_window_start {
                             storage.set(&DataKey::LatestWindowStart, &window_start);
-                            // In a new window; prior bucket is abandoned. Restart accumulator.
-                            if let Some(prev_start) = latest_window_start.checked_sub(duration) {
-                                storage.remove(&DataKey::RollingWindowBucket(prev_start));
-                            }
-                        }
-
-                        // Check if the current window's bucket already exceeds the cap.
-                        // If it does, a previous call breached the cap in this window and we latch
-                        // (issue #710: the accumulated value persists even if the breaching call
-                        // returned Err, so the bucket value itself acts as the latch).
-                        let current_accumulated = storage
-                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
-                            .unwrap_or(0);
-                        if current_accumulated > cap {
-                            return Err(PerihelionError::RollingWindowCapTriggered);
+                            // Leaving the memoized window: drop its bucket so that at most
+                            // one bucket exists, however many quiet windows pass (#905).
+                            storage.remove(&DataKey::RollingWindowBucket(latest_window_start));
                         }
 
                         // Accumulate this intent's amount into the current window.
+                        let current_accumulated = storage
+                            .get::<DataKey, i128>(&DataKey::RollingWindowBucket(window_start))
+                            .unwrap_or(0);
                         let accumulated = current_accumulated
                             .checked_add(amount)
                             .ok_or(PerihelionError::ArithmeticError)?;
-
-                        // Update the bucket before checking the cap, so the accumulated value
-                        // persists even if the breaching call returns Err (issue #710).
                         storage.set(&DataKey::RollingWindowBucket(window_start), &accumulated);
 
                         if accumulated > cap {
-                            // Cap exceeded: trigger halt and record the window for diagnostics.
+                            // Latch the breaker as a successful state transition. The message
+                            // is acknowledged with `Ok(false)` so these writes persist.
+                            storage.set(&DataKey::RollingWindowTriggered, &true);
                             storage.set(
                                 &DataKey::RollingWindowResetEarliestAt,
                                 &now.checked_add(duration)
@@ -1984,14 +2009,14 @@ impl Perihelion {
                                 (events::rolling_window_cap_triggered(env),),
                                 (window_start, accumulated),
                             );
-                            return Err(PerihelionError::RollingWindowCapExceeded);
+                            return Ok(false);
                         }
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn on_fill_instruction(
@@ -2054,8 +2079,11 @@ impl Perihelion {
             return Err(PerihelionError::UntrustedPeer);
         }
 
-        // Check value caps before registering the intent.
-        Self::enforce_value_caps(env, fi.min_dest_amount)?;
+        // Check value caps before registering the intent. A breach latches the
+        // breaker and acknowledges the message without registering it (#904).
+        if !Self::enforce_value_caps(env, fi.min_dest_amount)? {
+            return Ok(());
+        }
 
         let rec = IntentRecord {
             intent_hash: fi.intent_hash.clone(),
@@ -2265,25 +2293,45 @@ impl Perihelion {
         Ok(())
     }
 
-    /// TTL bump target covering `deadline + GRACE`, clamped to `MAX_TTL`.
+    /// Extend the instance entry's TTL to the documented policy (issue #912).
+    /// Called from every state-changing entrypoint, not only the fill path, so an
+    /// idle period in which only inbound registrations or cancellations happen
+    /// cannot archive the instance and block the exit paths.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND);
+    }
+
+    /// Persistent-entry TTL ceiling: the admin-configured `MaxTtl` (issue #340),
+    /// or `MAX_TTL_DEFAULT` when unset. Every persistent extension targets this
+    /// value, so `set_max_ttl` controls the archival policy it advertises (#911).
+    fn max_ttl(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTtl)
+            .unwrap_or(MAX_TTL_DEFAULT)
+    }
+
+    /// TTL bump target covering `deadline + GRACE`, clamped to the configured max TTL.
     ///
     /// Divides by `MIN_SECS_PER_LEDGER` (4 s) to over-provision the ledger
     /// count when actual close times are longer. This is the safe direction:
     /// a too-generous TTL wastes a small amount of rent but an under-estimate
     /// can archive the entry before the deadline passes.
     ///
-    /// The division and `.min(MAX_TTL as u64)` clamp are performed in `u64`
+    /// The division and `.min(max_ttl as u64)` clamp are performed in `u64`
     /// **before** the cast to `u32` (issue #30). A plain `as u32` on a `u64`
     /// value exceeding `u32::MAX` wraps modulo 2^32, producing a deceptively
     /// small TTL for a far-future deadline. By clamping first we guarantee the
-    /// value is provably in `[0, MAX_TTL]` when narrowed.
+    /// value is provably in `[0, max_ttl]` when narrowed.
     fn ttl_for_deadline(env: &Env, deadline: u64) -> u32 {
         let now = env.ledger().timestamp();
         let secs = deadline.saturating_sub(now);
         let ledgers_u64 = (secs / MIN_SECS_PER_LEDGER)
             .saturating_add(GRACE_LEDGERS as u64)
-            .min(MAX_TTL as u64);
-        // Safe: value is in [0, MAX_TTL] ⊆ [0, u32::MAX].
+            .min(Self::max_ttl(env) as u64);
+        // Safe: value is in [0, max_ttl] ⊆ [0, u32::MAX].
         ledgers_u64 as u32
     }
 }
