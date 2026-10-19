@@ -175,11 +175,12 @@ There is no automated sync between a deployment and the SDK. In the same PR:
 ```bash
 cd contracts/soroban
 cargo build --target wasm32-unknown-unknown --release
-stellar contract deploy --wasm target/wasm32-unknown-unknown/release/perihelion_settlement.wasm ...
+# Pass the admin multisig account, the LayerZero endpoint and the native token as
+# constructor arguments. The contract is configured in the same transaction that
+# creates it, so nobody can front-run a separate initialisation call (issue #910).
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/perihelion_settlement.wasm ... \
+  -- --admin $ADMIN --endpoint $LZ_ENDPOINT --native_token $NATIVE_TOKEN
 # -> $SETTLEMENT
-
-# Initialize with the admin multisig account and the LayerZero endpoint:
-stellar contract invoke --id $SETTLEMENT -- initialize --admin $ADMIN --endpoint $LZ_ENDPOINT
 ```
 
 ---
