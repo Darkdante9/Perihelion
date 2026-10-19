@@ -4,7 +4,7 @@
 #   docker build --build-arg PACKAGE=solver  -t perihelion-solver .
 #   docker build --build-arg PACKAGE=mempool -t perihelion-mempool .
 
-FROM node:20-alpine@sha256:d0f0f9e87e9451c2ae12a69b88c65b8eba13c7fa876beb0c4f1c45301aebcc5f AS base
+FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS base
 
 WORKDIR /app
 
@@ -33,7 +33,7 @@ FROM base AS prod-deps
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ─── Runtime stage ──────────────────────────────────────────────────────────
-FROM node:20-alpine@sha256:d0f0f9e87e9451c2ae12a69b88c65b8eba13c7fa876beb0c4f1c45301aebcc5f AS runtime
+FROM node:24-alpine@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f AS runtime
 
 ARG PACKAGE=relayer
 RUN case "$PACKAGE" in relayer|solver|mempool) ;; \
