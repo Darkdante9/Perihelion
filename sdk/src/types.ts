@@ -59,7 +59,7 @@ export type IntentStatus =
   | "pending" // signed, in the mempool, unclaimed
   | "claimed" // a solver has locked source funds
   | "settling" // cross-chain message in flight
-  | "settled" // assets released on Stellar
+  | "settled" // source-chain escrow emitted `Released`; bridge complete
   | "refunded" // deadline passed / failed; source funds returned
   | "expired"; // deadline passed before any claim
 
@@ -72,8 +72,16 @@ export type IntentStatus =
  * to report those will produce an HTTP 400.  Solver and relayer code that
  * calls {@link PerihelionClient.reportStatus} must use this narrower type
  * (or one of its literal members) to stay within the accepted vocabulary.
+ *
+ * `"filled"` is an intermediate, non-terminal state: the Stellar leg has been
+ * delivered but the source-chain escrow has not yet emitted `Released`.  It
+ * must not be treated as settled — a record only becomes `"settled"` once the
+ * source chain has released the funds.
  */
-export type MempoolIntentStatus = Extract<IntentStatus, "pending" | "settled" | "refunded" | "expired">;
+export type MempoolIntentStatus = Extract<
+  IntentStatus,
+  "pending" | "filled" | "settled" | "refunded" | "expired"
+>;
 
 /** An intent together with its signature and current status. */
 export interface SignedIntent {

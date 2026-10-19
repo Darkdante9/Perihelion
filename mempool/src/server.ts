@@ -29,6 +29,7 @@ const HASH_RE = /^0x[0-9a-f]{64}$/;
  */
 const INTENT_STATUSES: ReadonlySet<string> = new Set([
   "pending",
+  "filled",
   "settled",
   "refunded",
   "expired",
@@ -383,6 +384,7 @@ export class MempoolServer {
     const records = this.store.all();
     const recordsByStatus = {
       pending: records.filter((r) => r.status === "pending").length,
+      filled: records.filter((r) => r.status === "filled").length,
       settled: records.filter((r) => r.status === "settled").length,
       refunded: records.filter((r) => r.status === "refunded").length,
       expired: records.filter((r) => r.status === "expired").length,
@@ -395,6 +397,9 @@ export class MempoolServer {
       "# HELP mempool_store_pending_intents Number of pending intents",
       "# TYPE mempool_store_pending_intents gauge",
       `mempool_store_pending_intents ${recordsByStatus.pending}`,
+      "# HELP mempool_store_filled_intents Number of filled intents (delivered on Stellar, awaiting source-chain release)",
+      "# TYPE mempool_store_filled_intents gauge",
+      `mempool_store_filled_intents ${recordsByStatus.filled}`,
       "# HELP mempool_store_settled_intents Number of settled intents",
       "# TYPE mempool_store_settled_intents gauge",
       `mempool_store_settled_intents ${recordsByStatus.settled}`,
