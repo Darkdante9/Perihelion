@@ -15,6 +15,7 @@
 extern crate std;
 
 use super::*;
+use crate::test::evm_solver;
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Events, Ledger as _},
@@ -61,14 +62,13 @@ fn setup() -> Setup {
 
     let admin = Address::generate(&env);
     let endpoint = env.register(EventSpecMockEndpoint, ());
-    let id = env.register(Perihelion, ());
-    let client = PerihelionClient::new(&env, &id);
 
     let issuer = Address::generate(&env);
     let native_sac = env.register_stellar_asset_contract_v2(issuer);
     let native_token = native_sac.address();
 
-    client.initialize(&admin, &endpoint, &native_token);
+    let id = env.register(Perihelion, (&admin, &endpoint, &native_token));
+    let client = PerihelionClient::new(&env, &id);
 
     let src_eid = 30101u32;
     let peer = BytesN::from_array(&env, &[0xEE; 32]);
@@ -110,7 +110,7 @@ fn deliver_fill_instruction(
         min_dest_amount: 100,
         deadline,
         preferred_solver: None,
-            locked_solver: None,
+        locked_solver: None,
         reservation_window: 0,
     };
     let origin = Origin {
@@ -233,7 +233,7 @@ fn confirmation_sent_topic() {
     let h = hash(&s.env, 2);
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 9_000, 1);
 
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &250);
 
     let caller = Address::generate(&s.env);
@@ -260,6 +260,17 @@ fn cancelled_inbound_topic() {
 }
 
 #[test]
+fn cancelled_before_registration_topic() {
+    let s = setup();
+    let h = hash(&s.env, 5);
+
+    // The cancel overtakes its FillInstruction: no record exists yet.
+    deliver_cancel(&s, &h, 1);
+
+    assert_event_shape(&s.env, "cancelled_before_registration", 2);
+}
+
+#[test]
 fn cancel_ignored_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
@@ -273,7 +284,7 @@ fn cancel_ignored_topic() {
     let h = hash(&s.env, 4);
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 9_000, 1);
 
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &250);
 
     // Intent is already finalized (Settled) — the inbound cancel is ignored.
@@ -288,7 +299,8 @@ fn cancel_ignored_topic() {
 fn peer_change_proposed_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     assert_event_shape(&s.env, "peer_change_proposed", 1);
 }
 
@@ -296,7 +308,8 @@ fn peer_change_proposed_topic() {
 fn peer_change_cancelled_topic() {
     let s = setup();
     let new_peer = BytesN::from_array(&s.env, &[0x11; 32]);
-    s.client.propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
+    s.client
+        .propose_peer(&s.src_eid, &new_peer, &MIN_PEER_CHANGE_DELAY);
     s.client.cancel_pending_peer(&s.src_eid);
     assert_event_shape(&s.env, "peer_change_cancelled", 1);
 }
@@ -310,13 +323,13 @@ fn peer_change_cancelled_topic() {
 #[test]
 fn initialized_topic() {
     let s = setup();
-    // `initialize` ran inside `setup`; re-run it on a fresh contract so the
+    // The constructor ran inside `setup`; deploy a fresh contract so the
     // event is the latest invocation's output.
-    let id = s.env.register(Perihelion, ());
-    let client = PerihelionClient::new(&s.env, &id);
     let admin = Address::generate(&s.env);
     let endpoint = s.env.register(EventSpecMockEndpoint, ());
-    client.initialize(&admin, &endpoint, &s.native_token);
+    let _id = s
+        .env
+        .register(Perihelion, (&admin, &endpoint, &s.native_token));
     assert_event_shape(&s.env, "initialized", 1);
 }
 

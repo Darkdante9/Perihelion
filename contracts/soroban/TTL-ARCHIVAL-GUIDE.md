@@ -23,6 +23,13 @@ The Perihelion contract uses a two-tier TTL strategy to ensure terminal state re
   - `DataKey::ConfirmationSent(intent_hash)` - written when FillConfirmed is dispatched
 - **TTL**: `MAX_TTL` (3,110,400 ledgers ≈ 180 days)
 - **Contains**: Just a boolean flag indicating terminal state
+- **Ceiling**: the admin-configured `MaxTtl` (`set_max_ttl`, default `MAX_TTL`), used for every persistent extension, including `ttl_for_deadline` (issue #911)
+
+### Instance Entry (issue #912)
+- **Storage**: the instance holds admin, endpoint, peers, pause flags, caps and nonce floors
+- **Policy**: when remaining TTL falls below `INSTANCE_TTL_THRESHOLD` (17,280 ledgers ≈ 1 day), extend to `INSTANCE_TTL_EXTEND` (1,209,600 ledgers ≈ 70 days)
+- **Bumped by**: every state-changing entrypoint (inbound registration and cancellation, dispatch, cancel, prune, and all admin setters), not only the fill path
+- **Why**: if the instance is archived, every entrypoint fails, including the cancel and dispatch exit paths that remain available while paused
 
 ### Retention Asymmetry (Issue #29)
 

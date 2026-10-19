@@ -39,6 +39,20 @@ export interface RelayerConfig {
   readonly mempoolStatusToken?: string;
   /** Stellar transaction timeout in seconds. Defaults to 30. */
   readonly txTimeoutSeconds?: number;
+  /** Path of the JSON file that persists the relay cursor. */
+  readonly checkpointFile: string;
+  /** Path of the JSON file that persists dead-lettered messages. */
+  readonly deadLetterFile: string;
+  /** TCP port of the health / readiness / metrics server. Defaults to 8080. */
+  readonly healthPort: number;
+  /** Interface the health server binds to. Defaults to 127.0.0.1. */
+  readonly healthHost: string;
+  /** Bearer token required for `/metrics`, when set. */
+  readonly metricsToken?: string;
+  /** Milliseconds since the last successful tick before `/readyz` fails. Defaults to 3 × pollIntervalMs. */
+  readonly readinessStaleMs: number;
+  /** Maximum cursor lag, in blocks, before `/readyz` fails. Defaults to 500. */
+  readonly maxLagBlocks: number;
 }
 
 /** 0x-prefixed 20-byte EVM address. */
@@ -169,6 +183,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     );
   }
 
+  const checkpointFile = env.PERIHELION_CHECKPOINT_FILE || "./.perihelion-relayer-checkpoint.json";
+  const deadLetterFile = env.PERIHELION_DEAD_LETTER_FILE || "./.perihelion-relayer-dead-letter.json";
+
+  const healthPort = Number(env.PERIHELION_HEALTH_PORT ?? 8080);
+  if (!Number.isInteger(healthPort) || healthPort < 1 || healthPort > 65_535) {
+    errors.push(
+      `PERIHELION_HEALTH_PORT must be an integer between 1 and 65535, got: "${env.PERIHELION_HEALTH_PORT}"`,
+    );
+  }
+
+  const healthHost = env.PERIHELION_HEALTH_HOST || "127.0.0.1";
+  const metricsToken = env.PERIHELION_METRICS_TOKEN || undefined;
+
+  const readinessStaleMs = Number(env.PERIHELION_READINESS_STALE_MS ?? pollIntervalMs * 3);
+  if (!Number.isInteger(readinessStaleMs) || readinessStaleMs <= 0) {
+    errors.push(
+      `PERIHELION_READINESS_STALE_MS must be a positive integer, got: "${env.PERIHELION_READINESS_STALE_MS}"`,
+    );
+  }
+
+  const maxLagBlocks = Number(env.PERIHELION_MAX_LAG_BLOCKS ?? 500);
+  if (!Number.isInteger(maxLagBlocks) || maxLagBlocks < 0) {
+    errors.push(
+      `PERIHELION_MAX_LAG_BLOCKS must be a non-negative integer, got: "${env.PERIHELION_MAX_LAG_BLOCKS}"`,
+    );
+  }
+
   if (errors.length > 0) {
     throw new Error(
       `Relayer configuration error — fix the following before starting:\n  • ${errors.join("\n  • ")}`,
@@ -194,5 +235,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     mempoolUrl,
     mempoolStatusToken,
     txTimeoutSeconds,
+    checkpointFile,
+    deadLetterFile,
+    healthPort,
+    healthHost,
+    metricsToken,
+    readinessStaleMs,
+    maxLagBlocks,
   };
 }

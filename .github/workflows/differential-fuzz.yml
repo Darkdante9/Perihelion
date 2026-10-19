@@ -3,10 +3,22 @@ name: Differential Fuzz
 on:
   push:
     branches: [main]
+    paths:
+      - 'contracts/soroban/**'
+      - 'contracts/evm/**'
+      - 'contracts/shared/wire-vectors/**'
+      - 'scripts/run-differential-fuzz.sh'
+      - '.github/workflows/differential-fuzz.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'contracts/soroban/**'
+      - 'contracts/evm/**'
+      - 'contracts/shared/wire-vectors/**'
+      - 'scripts/run-differential-fuzz.sh'
+      - '.github/workflows/differential-fuzz.yml'
   schedule:
-    # Nightly extended run at 2 AM UTC
+    # Nightly extended run at 2 AM UTC (unfiltered; ignores the paths above)
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
@@ -355,6 +367,16 @@ jobs:
                   gh issue close "$n" --repo "$REPO" --comment "Differential fuzzing passed on \`$BRANCH\` in $RUN_URL."
                 done
           done
+
+          # Legacy per-run titles ("... failed on <event> run <id> (<branch>@<sha>)")
+          # predate the stable titles above and are matched here so they close too.
+          gh issue list --repo "$REPO" --state open --limit 100 \
+              --search "\"Differential fuzzing failed on\" in:title" --json number,title \
+            | jq -r --arg b "($BRANCH@" \
+                '.[] | select(.title | startswith("[FUZZ] Differential fuzzing failed on ") and contains($b)) | .number' \
+            | while read -r n; do
+                gh issue close "$n" --repo "$REPO" --comment "Differential fuzzing passed on \`$BRANCH\` in $RUN_URL."
+              done
 
       - name: Fail the job if fuzzing failed
         if: steps.summary.outputs.failed == 'true'

@@ -107,7 +107,10 @@ The keeper reward is paid from the Soroban settlement contract's native (XLM) ba
 2. **User-prepaid tips**: Each FillInstruction carries an optional `keeper_tip` (future extension) prepaid by the user.
 3. **Hybrid**: Small protocol reserve + optional user tips.
 
-If the contract runs out of XLM, `cancel_expired_intent` still succeeds (the cancellation is finalized), but the keeper reward payment fails silently (no payout). Operators must monitor reserves and top up as needed.
+The two keeper paths treat an underfunded reserve differently. Operators must monitor reserves and top up as needed.
+
+- **`cancel_expired_intent`**: the reward is a token transfer in the same invocation as the cancellation. If the reserve cannot cover it, the whole call reverts, so the cancellation is rolled back too and the keeper must retry after a top-up.
+- **`dispatch_confirmation`** (issue #913): the reward is paid only when the reserve covers `DispatchKeeperReward`. When it does not, the FillConfirmed dispatch and the `ConfirmationSent` marker still go through, and a `keeper_reward_skipped` event is emitted. The reserve is therefore not needed for the solver to be repaid on the source chain, but the keeper goes unpaid until the reserve is topped up.
 
 ## Refund Liveness Summary
 

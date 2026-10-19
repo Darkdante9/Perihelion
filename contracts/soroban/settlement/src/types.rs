@@ -77,7 +77,8 @@ pub enum DataKey {
     /// Earliest timestamp to allow resetting the rolling-window cap.
     RollingWindowResetEarliestAt,
 
-    // Persistent tier (rolling-window tracking, issue #145).
+    // Instance tier (rolling-window accumulator, issue #145). Only the current
+    // window's bucket is kept (#905).
     /// Rolling-window bucket: window start timestamp => cumulative settled amount.
     RollingWindowBucket(u64),
     /// Latest memoized window start timestamp (for efficiency).

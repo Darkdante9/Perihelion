@@ -19,9 +19,15 @@ pub enum PerihelionError {
     ContractPaused = 102,
 
     // --- Authorization ---
+    /// Intent is reserved for a different preferred solver or EVM lock holder
+    /// until its reservation window expires (solver-lock exclusivity).
+    ReservedForSolver = 132,
     // Endpoint and admin authorization failures are emitted by Soroban's
     // `require_auth` mechanism rather than this contract error enum. They are
     // intentionally not duplicated as unreachable ABI variants.
+    /// Intent reserved for a different preferred solver, or locked to a
+    /// different source-chain solver, during the reservation window.
+    ReservedForSolver = 132,
     /// Caller is not the pending admin nominee (accept_admin guard).
     NotPendingAdmin = 133,
     /// Admin and endpoint addresses must be distinct (initialize guard, issue #18).
@@ -70,6 +76,9 @@ pub enum PerihelionError {
     InvalidDelay = 152,
     /// A peer change is already pending for this eid, must cancel first (issue #715).
     PendingPeerChangeExists = 153,
+    /// Intent is reserved for its preferred solver or source-escrow identity until
+    /// the reservation window expires.
+    ReservedForSolver = 154,
 
     // --- Messaging ---
     /// Payload failed structural validation.
@@ -87,6 +96,9 @@ pub enum PerihelionError {
     /// an opaque revert from inside the endpoint client, so solver operators can
     /// distinguish fee estimation bugs from other dispatch failures.
     InsufficientLzFee = 164,
+    /// `solver_evm` is not a 20-byte EVM address left-padded to 32 bytes, or is
+    /// the zero address. Rejected before any token moves (issue #917).
+    InvalidSolverEvm = 165,
 
     // --- Invariant / internal ---
     /// Arithmetic error that prior checks should have made unreachable.

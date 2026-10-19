@@ -7,6 +7,12 @@ services:
     command: ["anvil --host 0.0.0.0 --port 8545"]
     ports:
       - "8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
     environment:
       RUST_LOG: debug
     networks:
@@ -17,17 +23,18 @@ services:
     image: stellar/quickstart:21.2.0
     command: --local --enable-soroban-rpc
     environment:
-      STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      # Must match the network `--local` creates; the Testnet passphrase is rejected.
+      STELLAR_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
       SOROBAN_RPC_HOST: "0.0.0.0"
       SOROBAN_RPC_PORT: "8000"
     ports:
-      - "5432:5432"    # PostgreSQL for Horizon
       - "8000:8000"    # Soroban RPC
       - "8006:8006"    # Horizon HTTP
     networks:
       - perihelion
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      # The quickstart image has no Node.js; probe Soroban RPC's getHealth instead.
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/rpc | grep -q healthy"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -42,27 +49,22 @@ services:
         PACKAGE: mempool
     depends_on:
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       # Production mode so Express never emits stack traces on error paths.
       NODE_ENV: production
       PORT: 3000
       PERIHELION_SOURCE_CHAIN_ID: 31337
-      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:?set PERIHELION_ESCROW_ADDRESS to the deployed escrow}
       # Bind every interface so the relayer and solver containers can reach it.
       PERIHELION_MEMPOOL_HOST: "0.0.0.0"
     ports:
       - "3000:3000"
     networks:
       - perihelion
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 404 ? 0 : 1)).on('error', () => process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+    # No healthcheck override: the image's healthcheck.cjs probes /healthz.
 
   # Perihelion relayer
   relayer:
@@ -73,27 +75,29 @@ services:
         PACKAGE: relayer
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       NODE_ENV: development
       # EVM configuration
       PERIHELION_EVM_RPC_URL: http://anvil:8545
-      PERIHELION_SOURCE_EID: 30101
+      # Local placeholder endpoint ids; the settlement peer must use the same values.
+      PERIHELION_SOURCE_EID: 31337
       # Stellar configuration
-      PERIHELION_STELLAR_RPC_URL: http://stellar:8000
-      STELLAR_NETWORK: "Test SDF Network ; September 2015"
-      PERIHELION_STELLAR_EID: 40161
+      PERIHELION_STELLAR_RPC_URL: http://stellar:8000/rpc
+      STELLAR_NETWORK: "Standalone Network ; February 2017"
+      PERIHELION_STELLAR_EID: 99161
       # Relayer configuration
-      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
-      PERIHELION_SETTLEMENT_CONTRACT: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:?set PERIHELION_ESCROW_ADDRESS to the deployed escrow}
+      PERIHELION_SETTLEMENT_CONTRACT: ${PERIHELION_SETTLEMENT_CONTRACT:?set PERIHELION_SETTLEMENT_CONTRACT to the deployed settlement contract}
       SIGNER_SECRET: ${SIGNER_SECRET:?set SIGNER_SECRET to a valid Stellar secret key}
       PERIHELION_CONFIRMATIONS: "1"
       PERIHELION_POLL_INTERVAL_MS: "5000"
-      PERIHELION_CHECKPOINT_FILE: "/tmp/relayer-checkpoint.json"
+      PERIHELION_CHECKPOINT_FILE: "/var/lib/perihelion/relayer-checkpoint.json"
+      PERIHELION_DEAD_LETTER_FILE: "/var/lib/perihelion/relayer-dead-letter.json"
       PERIHELION_HEALTH_PORT: "8080"
       # Bind every interface so the published port is reachable from the host.
       PERIHELION_HEALTH_HOST: "0.0.0.0"
@@ -104,7 +108,7 @@ services:
     networks:
       - perihelion
     volumes:
-      - relayer-checkpoint:/tmp
+      - relayer-state:/var/lib/perihelion
     healthcheck:
       test: ["CMD", "node", "/usr/local/lib/perihelion/healthcheck.cjs"]
       interval: 30s
@@ -121,11 +125,11 @@ services:
         PACKAGE: solver
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       NODE_ENV: development
       # Mempool configuration
@@ -134,7 +138,7 @@ services:
       PERIHELION_SOLVER_ADDRESS: ${PERIHELION_SOLVER_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
       # Chain configuration
       PERIHELION_SOURCE_CHAIN_ID: 31337
-      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}
+      PERIHELION_ESCROW_ADDRESS: ${PERIHELION_ESCROW_ADDRESS:?set PERIHELION_ESCROW_ADDRESS to the deployed escrow}
       # Solver parameters
       PERIHELION_MIN_MARGIN_BPS: 10
       PERIHELION_POLL_INTERVAL_MS: "2000"
@@ -143,10 +147,10 @@ services:
       PERIHELION_EVM_RPC_URL: http://anvil:8545
       PERIHELION_EVM_PRIVATE_KEY: ${PERIHELION_EVM_PRIVATE_KEY:?set PERIHELION_EVM_PRIVATE_KEY}
       # Executor configuration (Soroban)
-      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000
+      PERIHELION_SOROBAN_RPC_URL: http://stellar:8000/rpc
       PERIHELION_SOROBAN_SECRET_KEY: ${PERIHELION_SOROBAN_SECRET_KEY:?set PERIHELION_SOROBAN_SECRET_KEY}
-      STELLAR_NETWORK: "Test SDF Network ; September 2015"
-      PERIHELION_SETTLEMENT_CONTRACT_ID: "CA7QYNF7SOWQ3GLR4CIDVXIUCMEOBEEUHW5C33ATIO5Q5TR3LYAQHRJS"
+      STELLAR_NETWORK: "Standalone Network ; February 2017"
+      PERIHELION_SETTLEMENT_CONTRACT_ID: ${PERIHELION_SETTLEMENT_CONTRACT_ID:?set PERIHELION_SETTLEMENT_CONTRACT_ID to the deployed settlement contract}
       # Cache configuration
       PERIHELION_VERIFICATION_CACHE_SIZE: "10000"
       PERIHELION_SEEN_CACHE_SIZE: "50000"
@@ -170,4 +174,4 @@ networks:
     driver: bridge
 
 volumes:
-  relayer-checkpoint:
+  relayer-state:

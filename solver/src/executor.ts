@@ -12,7 +12,6 @@ import {
   createPublicClient,
   createWalletClient,
   http,
-  getAddress,
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -114,9 +113,9 @@ export class Executor {
   constructor(config?: ExecutorConfig, logger: Logger = console) {
     this.evmRpcUrl = config?.evmRpcUrl ?? "";
     this.sorobanRpcUrl = config?.sorobanRpcUrl ?? "";
-    this.evmPrivateKey = config?.evmPrivateKey ?? ("0x" as Hex);
+    this.evmPrivateKey = config?.evmPrivateKey ?? ("0x");
     this.sorobanSecretKey = config?.sorobanSecretKey ?? "";
-    this.escrowAddress = config?.escrowAddress ?? ("0x" as `0x${string}`);
+    this.escrowAddress = config?.escrowAddress ?? ("0x");
     this.settlementContractId = config?.settlementContractId ?? "";
     this.sourceChainId = config?.sourceChainId ?? 0;
     this.stellarNetwork = config?.stellarNetwork ?? "";
@@ -346,7 +345,7 @@ export class Executor {
     // Simulate to obtain the resource fee and prepared transaction.
     const simulated = await rpc.simulateTransaction(tx);
     if (!SorobanRpc.Api.isSimulationSuccess(simulated)) {
-      throw new Error(`fill_intent simulation failed: ${String((simulated as SorobanRpc.Api.SimulateTransactionErrorResponse).error)}`);
+      throw new Error(`fill_intent simulation failed: ${String((simulated).error)}`);
     }
 
     const prepared = SorobanRpc.assembleTransaction(tx, simulated).build();

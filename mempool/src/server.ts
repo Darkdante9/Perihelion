@@ -146,7 +146,7 @@ export class MempoolServer {
       res.status(200).send(this.getPrometheusMetrics());
     });
     this.app.get("/info", read, this.handleInfo.bind(this));
-    this.app.post("/intents", write, this.handleSubmitIntent.bind(this));
+    this.app.post("/intents", write, (req: Request, res: Response) => void this.handleSubmitIntent(req, res));
     this.app.get("/intents/:hash", read, this.handleGetIntent.bind(this));
     this.app.get("/intents", read, this.handleListIntents.bind(this));
     this.app.patch("/intents/:hash/status", write, this.handleUpdateStatus.bind(this));
@@ -237,7 +237,7 @@ export class MempoolServer {
     });
   }
 
-  private handleSubmitIntent(req: Request, res: Response): void {
+  private async handleSubmitIntent(req: Request, res: Response): Promise<void> {
     const body = req.body as Partial<SignedIntent> | undefined;
     if (!body || typeof body !== "object") {
       this.submissionStats.rejected++;
@@ -268,7 +268,12 @@ export class MempoolServer {
       res.status(400).json({ error: "Intent has expired" });
       return;
     }
-    if (!verifyIntent(parsed, signature as Hex, this.domain)) {
+    // verifyIntent is async: without the await the check below sees a Promise
+    // (always truthy), so no signature would ever be rejected. A throw from
+    // malformed input is treated as a failed verification, since Express 4 does
+    // not forward rejected promises from async handlers.
+    const signatureValid = await verifyIntent(parsed, signature, this.domain).catch(() => false);
+    if (!signatureValid) {
       this.submissionStats.rejected++;
       res.status(400).json({ error: "Signature verification failed" });
       return;
@@ -277,7 +282,7 @@ export class MempoolServer {
     const record: MempoolIntentRecord = {
       hash,
       intent: parsed,
-      signature: signature as Hex,
+      signature: signature,
       status: "pending",
       createdAt: Math.floor(Date.now() / 1000),
     };

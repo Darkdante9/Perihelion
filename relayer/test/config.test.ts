@@ -28,3 +28,49 @@ test("loadConfig rejects a missing required variable", () => {
   const { PERIHELION_EVM_RPC_URL: _omit, ...rest } = validConfigEnv();
   assert.throws(() => loadConfig(rest), /PERIHELION_EVM_RPC_URL/);
 });
+test("loadConfig applies health, readiness and state-file defaults", () => {
+  const config = loadConfig(validConfigEnv());
+  assert.equal(config.healthPort, 8080);
+  assert.equal(config.healthHost, "127.0.0.1");
+  assert.equal(config.metricsToken, undefined);
+  assert.equal(config.readinessStaleMs, config.pollIntervalMs * 3);
+  assert.equal(config.maxLagBlocks, 500);
+  assert.equal(config.checkpointFile, "./.perihelion-relayer-checkpoint.json");
+  assert.equal(config.deadLetterFile, "./.perihelion-relayer-dead-letter.json");
+});
+
+test("loadConfig reads health, readiness and state-file overrides", () => {
+  const config = loadConfig({
+    ...validConfigEnv(),
+    PERIHELION_HEALTH_PORT: "9001",
+    PERIHELION_HEALTH_HOST: "0.0.0.0",
+    PERIHELION_METRICS_TOKEN: "secret",
+    PERIHELION_READINESS_STALE_MS: "20000",
+    PERIHELION_MAX_LAG_BLOCKS: "42",
+    PERIHELION_CHECKPOINT_FILE: "/var/lib/perihelion/checkpoint.json",
+    PERIHELION_DEAD_LETTER_FILE: "/var/lib/perihelion/dead-letter.json",
+  });
+  assert.equal(config.healthPort, 9001);
+  assert.equal(config.healthHost, "0.0.0.0");
+  assert.equal(config.metricsToken, "secret");
+  assert.equal(config.readinessStaleMs, 20_000);
+  assert.equal(config.maxLagBlocks, 42);
+  assert.equal(config.checkpointFile, "/var/lib/perihelion/checkpoint.json");
+  assert.equal(config.deadLetterFile, "/var/lib/perihelion/dead-letter.json");
+});
+
+test("loadConfig rejects malformed health and readiness settings, naming each variable", () => {
+  const cases: Array<[string, string]> = [
+    ["PERIHELION_HEALTH_PORT", "abc"],
+    ["PERIHELION_HEALTH_PORT", "70000"],
+    ["PERIHELION_READINESS_STALE_MS", "-1"],
+    ["PERIHELION_MAX_LAG_BLOCKS", "1.5"],
+  ];
+  for (const [key, value] of cases) {
+    assert.throws(
+      () => loadConfig({ ...validConfigEnv(), [key]: value }),
+      new RegExp(key),
+      `${key}=${value} must be rejected`,
+    );
+  }
+});
