@@ -5,6 +5,12 @@ services:
     command: anvil --host 0.0.0.0 --port 8545
     ports:
       - "8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
     environment:
       RUST_LOG: debug
     networks:
@@ -19,7 +25,6 @@ services:
       SOROBAN_RPC_HOST: "0.0.0.0"
       SOROBAN_RPC_PORT: "8000"
     ports:
-      - "5432:5432"    # PostgreSQL for Horizon
       - "8000:8000"    # Soroban RPC
       - "8006:8006"    # Horizon HTTP
     networks:
@@ -40,9 +45,9 @@ services:
         PACKAGE: mempool
     depends_on:
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       # Production mode so Express never emits stack traces on error paths.
       NODE_ENV: production
@@ -71,11 +76,11 @@ services:
         PACKAGE: relayer
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       NODE_ENV: development
       # EVM configuration
@@ -120,11 +125,11 @@ services:
         PACKAGE: solver
     depends_on:
       mempool:
-        condition: service_started
+        condition: service_healthy
       anvil:
-        condition: service_started
+        condition: service_healthy
       stellar:
-        condition: service_started
+        condition: service_healthy
     environment:
       NODE_ENV: development
       # Mempool configuration
