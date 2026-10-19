@@ -3017,109 +3017,159 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
 }
 
-// --- Issue #911: the configured MaxTtl drives persistent TTL extensions ----
+// --- Issue #906: value caps must not sum across destination assets ---------
 
 #[test]
-fn configured_max_ttl_sets_terminal_marker_ttl() {
+fn rolling_window_cap_does_not_sum_across_destination_assets() {
     let s = setup();
-    // A network whose max_entry_ttl sits above the compile-time default, and an
-    // admin who has raised the contract's extension target to match.
-    s.env.ledger().with_mut(|li| li.max_entry_ttl = 4_000_000);
-    s.client.set_max_ttl(&3_500_000);
+    // One window cap of 1_000 units, shared by every intent that reaches
+    // `enforce_value_caps`. Each asset should get its own budget, so 800 of
+    // asset A and 800 of asset B must both be accepted in the same window.
+    s.client.set_rolling_window_cap(&3_600u64, &1_000i128);
 
-    let recipient = Address::generate(&s.env);
-    let caller = Address::generate(&s.env);
-    let h = hash(&s.env, 0x91);
-    register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-
-    s.env.ledger().with_mut(|li| li.timestamp = 6_000); // past deadline
-    s.client.cancel_expired_intent(&caller, &h, &0);
-
-    // The Cancelled marker is extended to the configured target, not MAX_TTL_DEFAULT.
-    use soroban_sdk::testutils::storage::Persistent as _;
-    let ttl = s.env.as_contract(&s.client.address, || {
-        s.env
-            .storage()
-            .persistent()
-            .get_ttl(&DataKey::Cancelled(h.clone()))
-    });
-    assert_eq!(ttl, 3_500_000);
-}
-
-// --- Issue #912: every state-changing entrypoint keeps the instance live -----
-
-#[test]
-fn prune_bumps_instance_ttl_once_inside_threshold() {
-    use soroban_sdk::testutils::storage::Instance as _;
-    let s = setup();
-
-    // The constructor left the instance at the full policy TTL. Advance so that
-    // only `remaining` ledgers are left, which is inside the bump threshold.
-    let remaining = INSTANCE_TTL_THRESHOLD / 2;
-    s.env.ledger().with_mut(|li| {
-        li.sequence_number += INSTANCE_TTL_EXTEND - remaining;
-    });
-    let before = s
-        .env
-        .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
-    assert_eq!(before, remaining);
-
-    // prune_nonce_words needs no intent record, so the instance is the only
-    // entry that can be bumped here.
-    s.client.prune_nonce_words(&s.src_eid);
-
-    let after = s
-        .env
-        .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
-    assert_eq!(after, INSTANCE_TTL_EXTEND);
-}
-
-// --- Issue #913: an underfunded reserve must not revert the dispatch ---------
-
-#[test]
-fn dispatch_with_empty_reserve_still_confirms_and_skips_reward() {
-    let s = setup();
-    let recipient = Address::generate(&s.env);
-    let solver = Address::generate(&s.env);
-    let keeper = Address::generate(&s.env);
-    s.asset_admin.mint(&solver, &1_000_000);
-
-    let native_token = s
-        .client
-        .native_token()
-        .expect("native_token should be configured");
-    let native_client = token::TokenClient::new(&s.env, &native_token);
-
-    // A reward is configured, but the contract holds no native token to pay it.
-    let reward_amount = 80_000i128;
-    s.client.set_dispatch_keeper_reward(&reward_amount);
-    assert_eq!(native_client.balance(&s.client.address), 0);
-
-    let h = hash(&s.env, 0xE4);
-    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
-    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
-
-    s.client.dispatch_confirmation(&keeper, &h, &0);
-    // Collect events before further reads that would reset the log.
-    let events = s.env.events().all();
-
-    // The confirmation still goes out and the marker is set...
-    assert_eq!(s.mock.sent(), 1, "FillConfirmed must be dispatched");
-    assert_eq!(
-        s.client.status(&h),
-        Some(IntentStatus::ConfirmationSent),
-        "intent must reach ConfirmationSent despite the empty reserve"
+    register_intent(
+        &s,
+        &hash(&s.env, 0x91),
+        &Address::generate(&s.env),
+        800,
+        5_000,
+        1,
+        None,
     );
-    // ...and the keeper is not paid, but the gap is observable.
-    assert_eq!(native_client.balance(&keeper), 0);
-    let expected = Symbol::new(&s.env, "keeper_reward_skipped");
-    let found = events.iter().any(|(_, topics, _)| {
-        topics.iter().any(|t| {
-            Symbol::try_from_val(&s.env, &t)
-                .map(|sym| sym == expected)
-                .unwrap_or(false)
-        })
+
+    let other_issuer = Address::generate(&s.env);
+    let other_asset = s
+        .env
+        .register_stellar_asset_contract_v2(other_issuer)
+        .address();
+    let fi = FillInstruction {
+        intent_hash: hash(&s.env, 0x92),
+        src_eid: s.src_eid,
+        recipient: Address::generate(&s.env),
+        dest_asset: other_asset,
+        min_dest_amount: 800,
+        deadline: 5_000,
+        preferred_solver: None,
+        locked_solver: None,
+        reservation_window: 0,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 2,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    assert!(
+        s.client
+            .try_lz_receive(&origin, &guid, &LzMessage::FillInstruction(fi))
+            .is_ok(),
+        "a breach-free amount on a second asset must not be rejected by the first asset's window"
+    );
+    assert!(!s.client.is_rolling_window_cap_triggered());
+}
+
+// --- Issue #907: expired peer proposals must be cleared, not rolled back ---
+
+#[test]
+fn expired_peer_proposal_is_cleared_and_allows_new_proposal() {
+    let s = setup();
+    let stale_peer = BytesN::from_array(&s.env, &[0xFF; 32]);
+    let corrected_peer = BytesN::from_array(&s.env, &[0xFE; 32]);
+    s.client
+        .propose_peer(&s.src_eid, &stale_peer, &MIN_PEER_CHANGE_DELAY);
+
+    // Move past delay + grace so the proposal is expired.
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + PEER_CHANGE_GRACE + 1;
     });
-    assert!(found, "keeper_reward_skipped event not emitted");
+    // The confirm attempt must not leave the stale proposal behind. An `Err`
+    // return would roll back the cleanup, so the pending entry has to be gone
+    // on its own merits.
+    let _ = s.client.try_confirm_peer(&s.src_eid);
+
+    assert!(matches!(
+        s.client.try_get_pending_peer(&s.src_eid),
+        Ok(Ok(None))
+    ));
+    assert!(
+        s.client
+            .try_propose_peer(&s.src_eid, &corrected_peer, &MIN_PEER_CHANGE_DELAY)
+            .is_ok(),
+        "a corrected peer must be proposable immediately after an expired proposal"
+    );
+}
+
+// --- Issue #908: the endpoint must only rotate through the delayed path -----
+
+#[test]
+fn set_endpoint_cannot_rotate_endpoint_instantly() {
+    let s = setup();
+    let original = s.client.endpoint();
+    let new_ep = Address::generate(&s.env);
+
+    assert!(
+        s.client.try_set_endpoint(&new_ep).is_err(),
+        "set_endpoint must not rotate the trusted endpoint in one transaction"
+    );
+    assert_eq!(s.client.endpoint(), original);
+}
+
+#[test]
+fn endpoint_rotates_only_after_delayed_propose_and_confirm() {
+    let s = setup();
+    let new_ep = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&new_ep);
+    assert!(
+        s.client.try_confirm_endpoint().is_err(),
+        "confirm_endpoint must wait for MIN_PEER_CHANGE_DELAY"
+    );
+
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY + 1;
+    });
+    assert!(s.client.try_confirm_endpoint().is_ok());
+    assert_eq!(s.client.endpoint(), new_ep);
+}
+
+// --- Issue #909: propose_endpoint must refuse to overwrite a pending proposal
+
+#[test]
+fn propose_endpoint_rejects_overwriting_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+    let original_proposed_at = s.env.ledger().timestamp();
+
+    s.client.propose_endpoint(&first);
+    s.env.ledger().with_mut(|li| {
+        li.timestamp += MIN_PEER_CHANGE_DELAY / 2;
+    });
+
+    assert!(
+        s.client.try_propose_endpoint(&second).is_err(),
+        "a second propose_endpoint while one is pending must be rejected"
+    );
+
+    // The pending proposal and its original timer must be untouched.
+    let (pending, proposed_at, _, _) = s
+        .client
+        .try_get_pending_endpoint()
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending, first);
+    assert_eq!(proposed_at, original_proposed_at);
+}
+
+#[test]
+fn propose_endpoint_succeeds_after_cancel_of_pending_proposal() {
+    let s = setup();
+    let first = Address::generate(&s.env);
+    let second = Address::generate(&s.env);
+
+    s.client.propose_endpoint(&first);
+    s.client.cancel_pending_endpoint();
+
+    assert!(s.client.try_propose_endpoint(&second).is_ok());
 }

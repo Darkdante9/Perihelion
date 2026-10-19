@@ -15,6 +15,8 @@
 
 #![cfg(test)]
 
+use crate::types::{CANCEL_INTENT_LENGTH, FILL_CONFIRMED_LENGTH, FILL_INSTRUCTION_LENGTH};
+
 extern crate std;
 
 use soroban_sdk::{Address, Bytes, BytesN, Env};
