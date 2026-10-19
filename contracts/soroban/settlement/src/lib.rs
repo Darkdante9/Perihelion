@@ -93,6 +93,7 @@ mod events {
         registered,
         confirmation_sent,
         cancelled_inbound,
+        cancelled_before_registration,
         cancel_ignored,
         nonce_words_pruned,
     );
@@ -142,6 +143,7 @@ mod events {
 // | `confirmation_sent`            | ("confirmation_sent", intent_hash)     | (solver: Address)
 // | `cancelled`                    | ("cancelled", intent_hash)             | (src_eid: u32, deadline: u64)
 // | `cancelled_inbound`            | ("cancelled_inbound", intent_hash)     | (src_eid: u32)
+// | `cancelled_before_registration`| ("cancelled_before_registration", intent_hash) | (src_eid: u32)
 // | `cancel_ignored`               | ("cancel_ignored", intent_hash)        | (status: u32)
 // | `nonce_words_pruned`           | ("nonce_words_pruned",)                | (eid: u32, old_floor: u64, new_floor: u64)
 
@@ -204,6 +206,12 @@ pub const MAX_DEADLINE_HORIZON: u64 = 604_800;
 /// to land before the deadline. Mirrors EVM's MIN_CONFIRMATION_GRACE (issue #293).
 /// 30 minutes = 1_800 s provides a buffer for confirmation relay and on-chain processing.
 pub const MIN_DISPATCH_WINDOW: u64 = 1_800;
+
+/// Ledgers a fill must stay unconfirmed before a third party may collect the
+/// dispatch keeper reward. About 30 minutes at ~5 second ledger close, matching
+/// `MIN_DISPATCH_WINDOW`. Without this delay the reward subsidises every fill
+/// instead of compensating a stalled confirmation.
+pub const DISPATCH_REWARD_GRACE_LEDGERS: u32 = 360;
 
 /// Minimum delay for peer changes (issue #165). Brings Soroban peer-management
 /// under comparable delay/governance as the EVM side (PerihelionTimelock.MIN_DELAY).
@@ -1065,6 +1073,15 @@ impl Perihelion {
         intent_hash: &BytesN<32>,
         fill_amount: i128,
     ) -> Result<(DataKey, IntentRecord), PerihelionError> {
+        // The EVM escrow decodes solver_evm as a 20-byte address left-padded to
+        // 32 bytes and reverts on anything else. That revert happens after the
+        // destination transfer has settled here, so the fill could not be
+        // recovered. Reject the malformed shape before any token moves.
+        let raw = solver_evm.to_array();
+        if raw[..12].iter().any(|b| *b != 0) || raw[12..].iter().all(|b| *b == 0) {
+            return Err(PerihelionError::InvalidSolverEvm);
+        }
+
         // Terminal-state guard via cheap markers (survives record archival).
         if Self::is_finalized(env, intent_hash) {
             return Err(PerihelionError::IntentFinalized);
@@ -1239,47 +1256,42 @@ impl Perihelion {
         // third-party keeper who covered the LayerZero fee to push a stalled
         // FillConfirmed through, making the permissionless dispatch path
         // economically self-sustaining rather than relying on altruism.
-        // Soroban invocations are atomic: a failed transfer would revert the whole
-        // call, rolling back the FillConfirmed dispatch and the ConfirmationSent
-        // marker (issue #913). So the reward is paid only when the contract's
-        // native-token reserve covers it. Otherwise the reward is skipped with an
-        // observable event, and the confirmation still goes out.
+        // The reward is paid after the dispatch is finalized so a failure here
+        // does not roll back the confirmation.
+        //
+        // Only a stalled confirmation earns the reward: the solver dispatching
+        // its own fill is never paid, and any other caller must wait until the
+        // fill has been unconfirmed for DISPATCH_REWARD_GRACE_LEDGERS.
         let dispatch_reward: i128 = env
             .storage()
             .instance()
             .get(&DataKey::DispatchKeeperReward)
             .unwrap_or(0);
-        if dispatch_reward > 0 {
-            match env
-                .storage()
-                .instance()
-                .get::<_, Address>(&DataKey::NativeToken)
-            {
-                Some(native_token) => {
-                    let token = token::TokenClient::new(&env, &native_token);
-                    if token.balance(&env.current_contract_address()) >= dispatch_reward {
-                        token.transfer(&env.current_contract_address(), &caller, &dispatch_reward);
-                        env.events().publish(
-                            (events::keeper_reward_paid(&env), intent_hash.clone()),
-                            (caller.clone(), dispatch_reward),
-                        );
-                    } else {
-                        // Reserve underfunded: skip rather than revert the dispatch.
-                        env.events().publish(
-                            (events::keeper_reward_skipped(&env), intent_hash.clone()),
-                            (caller.clone(), dispatch_reward),
-                        );
-                    }
-                }
-                None => {
-                    // native_token not yet configured: skip the reward and emit a
-                    // skipped event so the gap is observable off-chain, matching
-                    // the cancel_expired_intent behaviour.
-                    env.events().publish(
-                        (events::keeper_reward_skipped(&env), intent_hash.clone()),
-                        (caller.clone(), dispatch_reward),
-                    );
-                }
+        let reward_eligible = caller != solver
+            && env
+                .ledger()
+                .sequence()
+                .saturating_sub(rec.fill_ledger)
+                >= DISPATCH_REWARD_GRACE_LEDGERS;
+        if dispatch_reward > 0 && reward_eligible {
+            if let Some(native_token) = env.storage().instance().get(&DataKey::NativeToken) {
+                token::TokenClient::new(&env, &native_token).transfer(
+                    &env.current_contract_address(),
+                    &caller,
+                    &dispatch_reward,
+                );
+                env.events().publish(
+                    (events::keeper_reward_paid(&env), intent_hash.clone()),
+                    (caller.clone(), dispatch_reward),
+                );
+            } else {
+                // native_token not yet configured: skip the reward and emit a
+                // skipped event so the gap is observable off-chain, matching
+                // the cancel_expired_intent behaviour.
+                env.events().publish(
+                    (events::keeper_reward_skipped(&env), intent_hash.clone()),
+                    (caller.clone(), dispatch_reward),
+                );
             }
         }
 
@@ -1707,6 +1719,8 @@ impl Perihelion {
     /// `set_dispatch_keeper_reward`. A non-zero value incentivises third-party
     /// keepers to push stalled FillConfirmed messages through, recovering solver
     /// capital when the original solver is unable to complete the dispatch.
+    /// The reward is only paid to a caller other than the solver, once the fill
+    /// is `DISPATCH_REWARD_GRACE_LEDGERS` old.
     pub fn dispatch_keeper_reward(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -1818,7 +1832,7 @@ impl Perihelion {
                 // CancelIntent is an exit path — it unwinds existing intents and
                 // remains available even during pause to prevent fund stranding.
                 Self::accept_nonce(env, origin.src_eid, origin.nonce)?;
-                Self::on_cancel_inbound(env, ci)
+                Self::on_cancel_inbound(env, origin.src_eid, ci)
             }
         }
     }
@@ -2108,7 +2122,11 @@ impl Perihelion {
         Ok(())
     }
 
-    fn on_cancel_inbound(env: &Env, ci: CancelInstruction) -> Result<(), PerihelionError> {
+    fn on_cancel_inbound(
+        env: &Env,
+        src_eid: u32,
+        ci: CancelInstruction,
+    ) -> Result<(), PerihelionError> {
         if Self::is_finalized(env, &ci.intent_hash) {
             // Emit cancel_ignored event to record the race: cancel arrived after intent was finalized.
             // This enables auditing and reconciliation to distinguish "never arrived" from "lost race".
@@ -2128,34 +2146,55 @@ impl Perihelion {
             return Ok(());
         }
         let key = DataKey::Intent(ci.intent_hash.clone());
-        if let Some(mut rec) = env
+        let Some(mut rec) = env
             .storage()
             .persistent()
             .get::<DataKey, IntentRecord>(&key)
-        {
-            if rec.status == IntentStatus::Locked {
-                rec.status = IntentStatus::Cancelled;
-                env.storage().persistent().set(&key, &rec);
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
-                env.storage().persistent().extend_ttl(
-                    &DataKey::Cancelled(ci.intent_hash.clone()),
-                    Self::max_ttl(env) / 2,
-                    Self::max_ttl(env),
-                );
-                env.events().publish(
-                    (events::cancelled_inbound(env), ci.intent_hash.clone()),
-                    (rec.src_eid,),
-                );
-            } else {
-                // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
-                // Emit cancel_ignored event to record the race.
-                env.events().publish(
-                    (events::cancel_ignored(env), ci.intent_hash.clone()),
-                    (rec.status as u32,),
-                );
-            }
+        else {
+            // Inbound delivery is unordered, so this cancel can overtake the
+            // FillInstruction it refers to. Tombstone the intent as Cancelled so
+            // the late registration in on_fill_instruction sees it as finalized
+            // and is ignored. Without this marker the intent could still be filled
+            // after the source chain had already cancelled it.
+            env.storage()
+                .persistent()
+                .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Cancelled(ci.intent_hash.clone()),
+                MAX_TTL / 2,
+                MAX_TTL,
+            );
+            env.events().publish(
+                (
+                    events::cancelled_before_registration(env),
+                    ci.intent_hash.clone(),
+                ),
+                (src_eid,),
+            );
+            return Ok(());
+        };
+        if rec.status == IntentStatus::Locked {
+            rec.status = IntentStatus::Cancelled;
+            env.storage().persistent().set(&key, &rec);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Cancelled(ci.intent_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Cancelled(ci.intent_hash.clone()),
+                MAX_TTL / 2,
+                MAX_TTL,
+            );
+            env.events().publish(
+                (events::cancelled_inbound(env), ci.intent_hash.clone()),
+                (rec.src_eid,),
+            );
+        } else {
+            // Cancel arrived for an intent in a non-Locked state (Filled, ConfirmationSent).
+            // Emit cancel_ignored event to record the race.
+            env.events().publish(
+                (events::cancel_ignored(env), ci.intent_hash.clone()),
+                (rec.status as u32,),
+            );
         }
         Ok(())
     }

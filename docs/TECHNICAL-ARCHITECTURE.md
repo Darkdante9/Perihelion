@@ -973,7 +973,17 @@ fields. Amounts are unsigned 128-bit in the asset's smallest unit.
 | 82 | 8 | `fill_ledger` | **Off-chain / event log** | u64 Stellar ledger sequence at fill time — **informational only**. Sourced from `u32 env.ledger().sequence()` and widened to u64 on the wire: (1) future-proofs against the eventual Stellar u32 overflow (~136 years at current rates) without a breaking wire change; (2) matches the EVM `uint64` receiver width. Decoded and emitted in `Released` for dispute resolution and explorer display. |
 | **90** | | **total** | | |
 
-**`CancelIntent` (either direction)** — instructs the receiver to unwind.
+**`CancelIntent` (Soroban → EVM only)** — instructs the EVM escrow to refund the user.
+
+The EVM escrow never sends `CancelIntent` to Stellar. An EVM-originated cancel
+cannot be made safe: Stellar can fill an intent after the EVM refund boundary, so
+a cancel that reached Stellar after a local refund would not stop the fill and
+would pay the user and the solver for the same intent. Instead the protocol relies
+on timing. Stellar refuses fills within `MIN_DISPATCH_WINDOW` of the deadline, and
+the EVM `cancelExpired` opens only after `deadline + confirmationGrace`, so the two
+paths cannot both complete. The Soroban inbound `CancelIntent` handler is retained
+and tested, and it tombstones an intent whose cancel overtakes its FillInstruction
+(unordered delivery). No EVM code path produces it.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|

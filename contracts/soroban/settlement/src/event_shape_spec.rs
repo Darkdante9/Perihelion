@@ -15,6 +15,7 @@
 extern crate std;
 
 use super::*;
+use crate::test::evm_solver;
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Events, Ledger as _},
@@ -232,7 +233,7 @@ fn confirmation_sent_topic() {
     let h = hash(&s.env, 2);
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 9_000, 1);
 
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &250);
 
     let caller = Address::generate(&s.env);
@@ -259,6 +260,17 @@ fn cancelled_inbound_topic() {
 }
 
 #[test]
+fn cancelled_before_registration_topic() {
+    let s = setup();
+    let h = hash(&s.env, 5);
+
+    // The cancel overtakes its FillInstruction: no record exists yet.
+    deliver_cancel(&s, &h, 1);
+
+    assert_event_shape(&s.env, "cancelled_before_registration", 2);
+}
+
+#[test]
 fn cancel_ignored_topic() {
     let s = setup();
     let recipient = Address::generate(&s.env);
@@ -272,7 +284,7 @@ fn cancel_ignored_topic() {
     let h = hash(&s.env, 4);
     deliver_fill_instruction(&s, &h, &recipient, &dest_asset, 9_000, 1);
 
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &250);
 
     // Intent is already finalized (Settled) — the inbound cancel is ignored.

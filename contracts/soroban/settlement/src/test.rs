@@ -229,6 +229,18 @@ pub(crate) fn hash(env: &Env, b: u8) -> BytesN<32> {
     BytesN::from_array(env, &[b; 32])
 }
 
+/// A solver EVM identity in the shape the EVM escrow decodes: a 20-byte
+/// address left-padded with 12 zero bytes to 32.
+pub(crate) fn evm_solver(env: &Env, b: u8) -> BytesN<32> {
+    let mut raw = [0u8; 32];
+    raw[12..].fill(b);
+    BytesN::from_array(env, &raw)
+}
+
+fn advance_ledgers(s: &Setup, ledgers: u32) {
+    s.env.ledger().with_mut(|li| li.sequence_number += ledgers);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_intent(
     s: &Setup,
@@ -307,7 +319,7 @@ fn resource_budget_baselines_are_within_thresholds() {
         .get("fill_intent")
         .expect("fill_intent baseline missing");
     register_intent(&s, &h2, &recipient, 100_000, 5_000, 2, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     let (fill_cpu, fill_mem) = measure_entrypoint_budget(&s, |s| {
         s.client
             .fill_intent(&solver, &solver_evm, &h2, &250_000, &0);
@@ -353,7 +365,7 @@ fn registers_and_fills() {
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
     assert!(s.client.get_intent(&h).is_some());
 
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
     let tok = token::TokenClient::new(&s.env, &s.asset);
@@ -386,6 +398,94 @@ fn cancel_after_deadline_notifies_source() {
     );
 }
 
+/// Issue 915: inbound delivery is unordered, so a CancelIntent can overtake the
+/// FillInstruction it refers to. The late registration must be ignored, so an
+/// intent the source chain already cancelled can never be filled.
+#[test]
+fn cancel_before_fill_instruction_blocks_late_registration() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 0xC1);
+    let ci = CancelInstruction {
+        intent_hash: h.clone(),
+        reason: CANCEL_REASON_EXPIRED as u32,
+    };
+    let origin = Origin {
+        src_eid: s.src_eid,
+        sender: s.peer.clone(),
+        nonce: 1,
+    };
+    let guid = BytesN::from_array(&s.env, &[0u8; 32]);
+    s.client
+        .lz_receive(&origin, &guid, &LzMessage::Cancel(ci));
+
+    // The FillInstruction arrives afterwards on a later nonce.
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 2, None);
+
+    assert!(
+        s.client.get_intent(&h).is_none(),
+        "late FillInstruction must not register a cancelled intent"
+    );
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Cancelled));
+
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    let fill = s
+        .client
+        .try_deliver_intent(&solver, &solver_evm, &h, &100_000);
+    assert!(fill.is_err(), "a cancelled intent must not be fillable");
+    assert_eq!(
+        token::TokenClient::new(&s.env, &s.asset).balance(&recipient),
+        0,
+        "no destination asset may move for a cancelled intent"
+    );
+}
+
+/// Issue 917: a solver_evm the EVM escrow cannot decode must be rejected before
+/// any token moves. Otherwise the destination transfer settles on Stellar and
+/// the FillConfirmed then reverts on EVM, stranding the fill.
+#[test]
+fn rejects_malformed_solver_evm_before_any_transfer() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let h = hash(&s.env, 0xD1);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+
+    // A left-justified 20-byte address: its bytes sit in the high 12 positions.
+    let mut left_justified = [0u8; 32];
+    left_justified[..20].fill(0xAB);
+    let malformed = [
+        BytesN::from_array(&s.env, &left_justified),
+        BytesN::from_array(&s.env, &[0u8; 32]),
+    ];
+
+    for solver_evm in malformed {
+        let err = s
+            .client
+            .try_deliver_intent(&solver, &solver_evm, &h, &100_000)
+            .expect_err("malformed solver_evm must be rejected")
+            .unwrap();
+        assert_eq!(err, PerihelionError::InvalidSolverEvm);
+
+        let err = s
+            .client
+            .try_fill_intent(&solver, &solver_evm, &h, &100_000, &0)
+            .expect_err("malformed solver_evm must be rejected")
+            .unwrap();
+        assert_eq!(err, PerihelionError::InvalidSolverEvm);
+    }
+
+    let token = token::TokenClient::new(&s.env, &s.asset);
+    assert_eq!(token.balance(&solver), 1_000_000, "solver must keep its funds");
+    assert_eq!(token.balance(&recipient), 0, "no destination asset may move");
+    assert_eq!(s.client.status(&h), Some(IntentStatus::Locked));
+}
+
 // --- Invariant guards ---------------------------------------------------------
 
 #[test]
@@ -397,7 +497,7 @@ fn rejects_double_fill() {
     s.asset_admin.mint(&solver, &1_000_000);
     let h = hash(&s.env, 3);
     register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &100, &0);
     s.client.fill_intent(&solver, &evm, &h, &100, &0); // already settled
 }
@@ -411,7 +511,7 @@ fn rejects_fill_below_floor() {
     s.asset_admin.mint(&solver, &1_000_000);
     let h = hash(&s.env, 4);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &99_999, &0);
 }
 
@@ -425,7 +525,7 @@ fn rejects_fill_after_deadline() {
     let h = hash(&s.env, 5);
     register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
     s.env.ledger().with_mut(|li| li.timestamp = 5_000); // == deadline
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &100, &0);
 }
 
@@ -445,7 +545,7 @@ fn rejects_cancel_before_deadline() {
 fn rejects_fill_of_unknown_intent() {
     let s = setup();
     let solver = Address::generate(&s.env);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client
         .fill_intent(&solver, &evm, &hash(&s.env, 99), &100, &0);
 }
@@ -1224,7 +1324,7 @@ fn filled_event_shape() {
 
     let h = hash(&s.env, 2);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     let fill_amount = 250_000;
     s.client
         .fill_intent(&solver, &solver_evm, &h, &fill_amount, &0);
@@ -1287,7 +1387,7 @@ fn confirmation_sent_event_shape() {
 
     let h = hash(&s.env, 5);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     // Fill without dispatch via deliver_intent
     s.client.deliver_intent(&solver, &solver_evm, &h, &250_000);
 
@@ -1315,7 +1415,7 @@ fn status_filled_after_deliver_without_dispatch() {
 
     let h = hash(&s.env, 0xD1);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     // Settled marker is set but ConfirmationSent is not.
@@ -1345,7 +1445,7 @@ fn status_confirmation_sent_after_dispatch() {
 
     let h = hash(&s.env, 0xD2);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     let caller = Address::generate(&s.env);
@@ -1368,7 +1468,7 @@ fn status_confirmation_sent_after_fill_intent() {
 
     let h = hash(&s.env, 0xD3);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.fill_intent(&solver, &solver_evm, &h, &100_000, &0);
 
     assert_eq!(
@@ -1398,7 +1498,7 @@ fn status_uses_markers_independently_of_record() {
     // Path A: only Settled marker (deliver_intent, no dispatch).
     let ha = hash(&s.env, 0xD4);
     register_intent(&s, &ha, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &ha, &100_000);
     assert_eq!(s.client.status(&ha), Some(IntentStatus::Filled));
 
@@ -1552,7 +1652,7 @@ fn cancel_ignored_event_shape() {
     s.asset_admin.mint(&solver, &1_000_000);
     let h = hash(&s.env, 7);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &100_000, &0); // intent now Filled
 
     // Send a cancel after it's already filled
@@ -1631,7 +1731,7 @@ fn rejects_fill_while_paused() {
     let s = setup();
     s.client.set_paused(&true);
     let solver = Address::generate(&s.env);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client
         .fill_intent(&solver, &evm, &hash(&s.env, 11), &100, &0);
 }
@@ -1664,7 +1764,7 @@ fn pause_blocks_fill_intent() {
     let h = hash(&s.env, 20);
     // Register via lz_receive (not pause-gated) so there is an intent to fill.
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     // fill_intent must revert.
     s.client.fill_intent(&solver, &evm, &h, &100_000, &0);
 }
@@ -1684,7 +1784,7 @@ fn pause_blocks_fill_intent_moves_no_tokens() {
     let solver_before = tok.balance(&solver);
     let recipient_before = tok.balance(&recipient);
 
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     let result = s.client.try_fill_intent(&solver, &evm, &h, &100_000, &0);
     assert!(result.is_err());
     // No tokens moved.
@@ -1738,7 +1838,7 @@ fn pause_blocks_dispatch_confirmation() {
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
 
     // Fill without dispatch (deliver_intent path); then pause.
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.deliver_intent(&solver, &evm, &h, &100_000);
     s.client.set_paused(&true);
 
@@ -1799,7 +1899,7 @@ fn unpause_restores_fill_intent() {
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
 
     s.client.set_paused(&true);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     assert!(s
         .client
         .try_fill_intent(&solver, &evm, &h, &100_000, &0)
@@ -1942,7 +2042,7 @@ fn fill_dispatches_evm_decodable_confirmation() {
 
     let h = hash(&s.env, 1);
     register_intent(&s, &h, &recipient, 100_000, 5_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.fill_intent(&solver, &solver_evm, &h, &250_000, &0);
 
     let msg = s.mock.last().message;
@@ -2026,7 +2126,7 @@ fn cancel_filled_intent_returns_already_filled() {
     // deadline far in future so fill succeeds
     register_intent(&s, &h, &recipient, 1, 9_000, 1, None);
     // Deliver (fill) without dispatching confirmation, leaving status = Filled.
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.deliver_intent(&solver, &evm, &h, &100);
     assert_eq!(
         s.client.get_intent(&h).unwrap().status,
@@ -2047,7 +2147,7 @@ fn cancel_confirmation_sent_intent_returns_already_filled() {
     s.asset_admin.mint(&solver, &1_000_000);
     let h = hash(&s.env, 21);
     register_intent(&s, &h, &recipient, 1, 9_000, 1, None);
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &100, &0);
     assert_eq!(
         s.client.get_intent(&h).unwrap().status,
@@ -2135,7 +2235,7 @@ fn amount_boundary_i128_max_fills() {
     let h = hash(&s.env, 0xA1);
     register_intent(&s, &h, &recipient, max_amount, 5_000, 1, None);
 
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &max_amount, &0);
 
     let tok = token::TokenClient::new(&s.env, &s.asset);
@@ -2154,7 +2254,7 @@ fn amount_boundary_fill_amount_one() {
     let h = hash(&s.env, 0xA2);
     register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
 
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &1, &0);
     assert!(s.client.is_settled(&h));
 }
@@ -2171,7 +2271,7 @@ fn amount_boundary_fill_amount_zero_rejected() {
     let h = hash(&s.env, 0xA3);
     register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
 
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &0, &0);
 }
 
@@ -2187,7 +2287,7 @@ fn amount_boundary_fill_amount_negative_rejected() {
     let h = hash(&s.env, 0xA4);
     register_intent(&s, &h, &recipient, 1, 5_000, 1, None);
 
-    let evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let evm = evm_solver(&s.env, 0x11);
     s.client.fill_intent(&solver, &evm, &h, &-1, &0);
 }
 
@@ -2510,7 +2610,7 @@ fn fill_and_deliver_reject_identical_inputs_identically() {
     let s = setup();
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
-    let solver_evm = BytesN::from_array(&s.env, &[0x11; 32]);
+    let solver_evm = evm_solver(&s.env, 0x11);
     s.asset_admin.mint(&solver, &5_000_000);
 
     let assert_parity = |h: &BytesN<32>, amount: i128, expected: PerihelionError, case: &str| {
@@ -2712,7 +2812,7 @@ fn test_quote_lz_fee_empty_vs_correct_size() {
 
     let solver = Address::generate(&s.env);
     s.asset_admin.mint(&solver, &250_000);
-    let solver_evm = BytesN::from_array(&s.env, &[7u8; 32]);
+    let solver_evm = evm_solver(&s.env, 7);
 
     // Using floor quote should fail
     let err = s
@@ -2807,7 +2907,7 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
 
     let h = hash(&s.env, 0xE1);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // Solver delivers but does NOT dispatch.
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
@@ -2817,6 +2917,9 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
     assert_eq!(s.mock.sent(), 0, "no confirmation sent yet");
 
     let keeper_balance_before = native_client.balance(&keeper);
+
+    // The confirmation has stalled for the full grace period.
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
 
     // Keeper dispatches the stalled confirmation.
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2863,6 +2966,73 @@ fn keeper_dispatches_stalled_confirmation_and_earns_reward() {
     assert!(sent_found, "confirmation_sent event not emitted");
 }
 
+/// Issue 914: the solver dispatching its own fill earns nothing, even after the
+/// grace period, so the reserve is not drained by every normal fill.
+#[test]
+fn solver_self_dispatch_after_grace_earns_no_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s.client.native_token().expect("native_token configured");
+    let native_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+    native_admin.mint(&s.client.address, &1_000_000i128);
+    s.client.set_dispatch_keeper_reward(&80_000i128);
+
+    let h = hash(&s.env, 0xE4);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
+
+    let solver_balance_before = native_client.balance(&solver);
+    s.client.dispatch_confirmation(&solver, &h, &0);
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+    assert_eq!(s.mock.sent(), 1, "FillConfirmed must still be dispatched");
+    assert_eq!(
+        native_client.balance(&solver),
+        solver_balance_before,
+        "solver must not receive the dispatch reward for its own fill"
+    );
+}
+
+/// Issue 914: a third party dispatching before the fill has been unconfirmed
+/// for the grace period is not paid, so solvers cannot farm the reward by
+/// racing their own fill.
+#[test]
+fn third_party_dispatch_before_grace_earns_no_reward() {
+    let s = setup();
+    let recipient = Address::generate(&s.env);
+    let solver = Address::generate(&s.env);
+    let keeper = Address::generate(&s.env);
+    s.asset_admin.mint(&solver, &1_000_000);
+
+    let native_token = s.client.native_token().expect("native_token configured");
+    let native_admin = token::StellarAssetClient::new(&s.env, &native_token);
+    let native_client = token::TokenClient::new(&s.env, &native_token);
+    native_admin.mint(&s.client.address, &1_000_000i128);
+    s.client.set_dispatch_keeper_reward(&80_000i128);
+
+    let h = hash(&s.env, 0xE5);
+    register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
+    let solver_evm = evm_solver(&s.env, 0xAB);
+    s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS - 1);
+
+    let keeper_balance_before = native_client.balance(&keeper);
+    s.client.dispatch_confirmation(&keeper, &h, &0);
+
+    assert_eq!(s.client.status(&h), Some(IntentStatus::ConfirmationSent));
+    assert_eq!(
+        native_client.balance(&keeper),
+        keeper_balance_before,
+        "reward must not be paid before the grace period elapses"
+    );
+}
+
 /// AC3 variant: When dispatch_keeper_reward is 0, no reward is paid and
 /// dispatch still succeeds (zero-reward is the default / opt-out path).
 #[test]
@@ -2876,7 +3046,7 @@ fn dispatch_confirmation_with_zero_reward_still_succeeds() {
     // dispatch_keeper_reward left at default 0.
     let h = hash(&s.env, 0xE2);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
 
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2905,8 +3075,9 @@ fn dispatch_confirmation_skips_reward_when_native_token_unset() {
 
     let h = hash(&s.env, 0xE3);
     register_intent(&s, &h, &recipient, 100_000, 9_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
+    advance_ledgers(&s, DISPATCH_REWARD_GRACE_LEDGERS);
 
     // Should not revert despite missing native_token.
     s.client.dispatch_confirmation(&keeper, &h, &0);
@@ -2933,7 +3104,7 @@ fn list_undispatched_intents_filters_correctly() {
     let recipient = Address::generate(&s.env);
     let solver = Address::generate(&s.env);
     s.asset_admin.mint(&solver, &5_000_000);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // h1: Locked (never filled).
     let h1 = hash(&s.env, 0xF1);
@@ -2985,7 +3156,7 @@ fn cancel_expired_intent_blocked_after_deliver_intent() {
     let h = hash(&s.env, 0xE4);
     // Set a tight deadline so we can advance past it.
     register_intent(&s, &h, &recipient, 100_000, 3_000, 1, None);
-    let solver_evm = BytesN::from_array(&s.env, &[0xAB; 32]);
+    let solver_evm = evm_solver(&s.env, 0xAB);
 
     // Deliver asset but do not dispatch confirmation.
     s.client.deliver_intent(&solver, &solver_evm, &h, &100_000);
