@@ -153,9 +153,10 @@ test-all-strict: assert-all-toolchains ## Run all test suites; FAILS if any tool
 
 lint: lint-ts lint-soroban lint-evm ## Lint all stacks
 
-lint-ts: ## Lint TypeScript packages
+lint-ts: ## Lint TypeScript (ESLint) and type-check every workspace (tsc)
 	@echo "▶ lint-ts"
-	npm run lint --if-present
+	npm run lint
+	npm run typecheck
 
 lint-soroban: ## Clippy lint for Soroban contract
 	@echo "▶ lint-soroban"
@@ -179,11 +180,9 @@ lint-evm: ## Slither static analysis for EVM contract (requires slither)
 
 fmt: fmt-ts fmt-soroban fmt-evm ## Auto-format all stacks
 
-fmt-ts: ## Format TypeScript (prettier, if configured)
+fmt-ts: ## Format TypeScript sources with Prettier
 	@echo "▶ fmt-ts"
-	@if npm run fmt --if-present 2>/dev/null; then true; else \
-		echo "⏭ skipping fmt-ts — no fmt script configured (Prettier not yet introduced)"; \
-	fi
+	npm run fmt
 
 fmt-soroban: ## Format Rust code (rustfmt)
 	@echo "▶ fmt-soroban"

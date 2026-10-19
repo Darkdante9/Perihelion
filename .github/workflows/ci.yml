@@ -162,6 +162,9 @@ jobs:
       - name: Build all packages
         run: make build-ts
 
+      - name: Lint and typecheck
+        run: make lint-ts
+
       - name: Run tests
         run: make test-ts
 

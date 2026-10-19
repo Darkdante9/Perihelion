@@ -23,7 +23,6 @@ import {
   FILL_INSTRUCTION_LENGTH,
   type PendingMessage,
   type MessageKey,
-  type MessageType,
 } from "./types.js";
 
 /** Configuration for SorobanDestinationDelivery. */
@@ -320,10 +319,3 @@ export class SorobanDestinationDelivery implements DestinationDelivery {
   }
 }
 
-function toAddressScVal(addr: string): xdr.ScVal {
-  try {
-    return new Address(addr).toScVal();
-  } catch {
-    return nativeToScVal(addr, { type: "address" });
-  }
-}
