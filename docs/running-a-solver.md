@@ -59,7 +59,7 @@ export PERIHELION_EVM_PRIVATE_KEY=0x...
 ### 3. Fund accounts
 
 **Stellar account:**
-- Obtain testnet XLM from the [Stellar Friendbot](https://developers.stellar.org/docs/tools/stellar-cli) or a faucet
+- Obtain testnet XLM with `stellar keys fund` ([Stellar CLI](https://developers.stellar.org/docs/tools/cli)) or a faucet
 - On mainnet, acquire XLM through an exchange
 
 **EVM account:**
